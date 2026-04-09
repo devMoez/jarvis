@@ -50,6 +50,8 @@ from audio.tts import speak
 from audio.wake_word import start_listening, stop_listening
 from memory.long_term import retrieve, remember
 from memory.extractor import extract_and_store_async
+from core.skills import list_skills, add_skill, remove_skill, clear_skills
+from core.profile import get_profile, set_field, set_preference, clear_field
 from tools.search import search_web
 from tools.browser import open_url, scrape_page
 from tools.app_control import open_app
@@ -150,18 +152,41 @@ def cmd_help():
     console.print()
     console.print("  [bold white]Slash Commands[/]")
     console.print("  [dim]─────────────────────────────────────────[/]")
-    rows = [
-        ("/help",     "Show this screen"),
-        ("/commands", "List all Jarvis capabilities"),
-        ("/voice",    "Switch to voice input mode"),
-        ("/text",     "Switch to text input mode"),
-        ("/clear",    "Clear the terminal"),
-        ("/memory",   "Show stored long-term memories"),
-        ("/mode",     "Show current mode"),
-        ("/quit",     "Exit Jarvis"),
-    ]
-    for cmd, desc in rows:
-        console.print(f"  [bold cyan]{cmd:<12}[/] [white]{desc}[/]")
+    groups = {
+        "Navigation": [
+            ("/help",                "Show this screen"),
+            ("/commands",            "List all capabilities"),
+            ("/clear",               "Clear the terminal"),
+            ("/mode",                "Show current mode + version"),
+            ("/quit",                "Exit Jarvis"),
+        ],
+        "Input Mode": [
+            ("/voice",               "Switch to voice input"),
+            ("/text",                "Switch to text input (default)"),
+        ],
+        "Memory": [
+            ("/memory",              "List all long-term memories"),
+            ("/memory add <fact>",   "Add a memory manually"),
+            ("/memory remove <n>",   "Remove memory by number"),
+            ("/memory clear",        "Wipe all memories"),
+        ],
+        "Skills": [
+            ("/skill",               "List persistent behaviors"),
+            ("/skill add <text>",    "Add a permanent behavior Jarvis always follows"),
+            ("/skill remove <id>",   "Remove a skill"),
+            ("/skill clear",         "Remove all skills"),
+        ],
+        "Profile": [
+            ("/profile",             "Show your profile"),
+            ("/profile set name X",  "Set your name"),
+            ("/profile set timezone X", "Set your timezone"),
+            ("/profile pref <k> <v>","Set a preference"),
+        ],
+    }
+    for group, rows in groups.items():
+        console.print(f"\n  [bold white]{group}[/]")
+        for cmd, desc in rows:
+            console.print(f"  [bold cyan]  {cmd:<28}[/] [dim]{desc}[/]")
     console.print()
     console.print("  [bold white]Usage Tips[/]")
     console.print("  [dim]─────────────────────────────────────────[/]")
@@ -222,26 +247,162 @@ def cmd_commands():
         console.print()
 
 # ── /memory ───────────────────────────────────────────────────────────────────
-def cmd_memory():
+def cmd_memory(args: list[str] = []):
+    """
+    /memory              — list all memories
+    /memory add <fact>   — add a memory manually
+    /memory remove <id>  — remove memory by ID
+    /memory clear        — wipe all memories
+    """
+    from memory.long_term import _get_collection, store
+
+    sub = args[0].lower() if args else "list"
+
+    if sub == "add" and len(args) > 1:
+        fact = " ".join(args[1:])
+        store(fact)
+        console.print(f"\n  [bright_blue][MEMORY][/] Saved: [white]{sanitize(fact)}[/]\n")
+        return
+
+    if sub == "remove" and len(args) > 1:
+        try:
+            idx = int(args[1]) - 1
+            col = _get_collection()
+            results = col.get()
+            ids = results.get("ids", [])
+            if 0 <= idx < len(ids):
+                col.delete(ids=[ids[idx]])
+                console.print(f"\n  [bright_blue][MEMORY][/] Removed entry {idx + 1}.\n")
+            else:
+                console.print(f"  [red]  No memory at index {idx + 1}[/]")
+        except ValueError:
+            console.print("  [red]  Usage: /memory remove <number>[/]")
+        return
+
+    if sub == "clear":
+        col = _get_collection()
+        col.delete(where={"$exists": True}) if col.count() > 0 else None
+        console.print("\n  [bright_blue][MEMORY][/] All memories cleared.\n")
+        return
+
+    # Default: list
     try:
-        from memory.long_term import _get_collection
         col = _get_collection()
         count = col.count()
         if count == 0:
-            console.print("  [dim]No memories stored yet.[/]")
+            console.print("\n  [dim]  No memories stored yet.[/]\n")
             return
         results = col.get()
         docs = results.get("documents", [])
         console.print()
-        console.print(f"  [bold bright_blue]Long-term memories ({count})[/]")
+        console.print(f"  [bold bright_blue]  Memories  ({count})[/]")
         console.print("  [dim]─────────────────────────────────────────[/]")
-        for i, doc in enumerate(docs[:20], 1):
+        for i, doc in enumerate(docs[:30], 1):
             console.print(f"  [bright_blue]{i:>2}.[/] [white]{sanitize(doc)}[/]")
-        if count > 20:
-            console.print(f"  [dim]  ... and {count - 20} more[/]")
+        if count > 30:
+            console.print(f"  [dim]  ... and {count - 30} more[/]")
         console.print()
+        console.print("  [dim]  /memory add <fact>  |  /memory remove <n>  |  /memory clear[/]\n")
     except Exception as e:
-        console.print(f"  [red]Could not load memories: {e}[/]")
+        console.print(f"  [red]  Could not load memories: {e}[/]")
+
+
+# ── /skill ────────────────────────────────────────────────────────────────────
+def cmd_skill(args: list[str] = []):
+    """
+    /skill               — list skills
+    /skill add <text>    — add a permanent skill/behavior
+    /skill remove <id>   — remove a skill
+    /skill clear         — remove all skills
+    """
+    sub = args[0].lower() if args else "list"
+
+    if sub == "add" and len(args) > 1:
+        instruction = " ".join(args[1:])
+        skill = add_skill(instruction)
+        console.print(f"\n  [green][SKILL][/] Added #{skill['id']}: [white]{sanitize(instruction)}[/]\n")
+        return
+
+    if sub == "remove" and len(args) > 1:
+        try:
+            sid = int(args[1])
+            if remove_skill(sid):
+                console.print(f"\n  [green][SKILL][/] Removed skill #{sid}.\n")
+            else:
+                console.print(f"  [red]  Skill #{sid} not found.[/]")
+        except ValueError:
+            console.print("  [red]  Usage: /skill remove <id>[/]")
+        return
+
+    if sub == "clear":
+        n = clear_skills()
+        console.print(f"\n  [green][SKILL][/] Cleared {n} skill(s).\n")
+        return
+
+    # Default: list
+    skills = list_skills()
+    console.print()
+    console.print(f"  [bold green]  Skills  ({len(skills)})[/]")
+    console.print("  [dim]─────────────────────────────────────────[/]")
+    if not skills:
+        console.print("  [dim]  No skills set yet.[/]")
+        console.print("  [dim]  Example: /skill add always reply in bullet points[/]")
+    else:
+        for s in skills:
+            console.print(f"  [green]{s['id']:>2}.[/] [white]{sanitize(s['instruction'])}[/]")
+    console.print()
+    console.print("  [dim]  /skill add <instruction>  |  /skill remove <id>  |  /skill clear[/]\n")
+
+
+# ── /profile ──────────────────────────────────────────────────────────────────
+def cmd_profile(args: list[str] = []):
+    """
+    /profile                    — show profile
+    /profile set name Alex      — set your name
+    /profile set timezone PST   — set timezone
+    /profile set <key> <value>  — set any field
+    /profile pref <key> <value> — set a preference
+    /profile clear <key>        — remove a field
+    """
+    sub = args[0].lower() if args else "show"
+
+    if sub == "set" and len(args) >= 3:
+        key = args[1].lower()
+        value = " ".join(args[2:])
+        set_field(key, value)
+        console.print(f"\n  [cyan][PROFILE][/] Set {key} = [white]{sanitize(value)}[/]\n")
+        return
+
+    if sub == "pref" and len(args) >= 3:
+        key = args[1]
+        value = " ".join(args[2:])
+        set_preference(key, value)
+        console.print(f"\n  [cyan][PROFILE][/] Preference set: {key} = [white]{sanitize(value)}[/]\n")
+        return
+
+    if sub == "clear" and len(args) >= 2:
+        key = args[1].lower()
+        if clear_field(key):
+            console.print(f"\n  [cyan][PROFILE][/] Cleared {key}.\n")
+        else:
+            console.print(f"  [red]  Field '{key}' not found.[/]")
+        return
+
+    # Default: show
+    p = get_profile()
+    console.print()
+    console.print("  [bold cyan]  Profile[/]")
+    console.print("  [dim]─────────────────────────────────────────[/]")
+    console.print(f"  [cyan]Name[/]      [white]{p.get('name') or '(not set)'}[/]")
+    console.print(f"  [cyan]Timezone[/]  [white]{p.get('timezone') or '(not set)'}[/]")
+    console.print(f"  [cyan]Language[/]  [white]{p.get('language', 'English')}[/]")
+    prefs = p.get("preferences", {})
+    if prefs:
+        console.print(f"  [cyan]Prefs[/]")
+        for k, v in prefs.items():
+            console.print(f"    [dim cyan]{k}[/]  [white]{v}[/]")
+    console.print()
+    console.print("  [dim]  /profile set name <name>  |  /profile set timezone <tz>  |  /profile pref <key> <val>[/]\n")
 
 # ── Tool status display ───────────────────────────────────────────────────────
 def print_tool_event(tool_name: str):
@@ -301,10 +462,12 @@ def ask_streaming(user_text: str) -> str:
     return full
 
 # ── Slash command router ──────────────────────────────────────────────────────
-def handle_slash(cmd: str) -> bool:
+def handle_slash(raw: str) -> bool:
     """Returns True if command was handled."""
     global _mode, _running
-    cmd = cmd.strip().lower()
+    parts = raw.strip().split()
+    cmd = parts[0].lower()
+    args = parts[1:]
 
     if cmd == "/help":
         cmd_help(); return True
@@ -312,15 +475,19 @@ def handle_slash(cmd: str) -> bool:
         cmd_commands(); return True
     if cmd == "/clear":
         print_banner(); return True
-    if cmd == "/memory":
-        cmd_memory(); return True
+    if cmd in ("/memory", "/mem"):
+        cmd_memory(args); return True
+    if cmd in ("/skill", "/skills"):
+        cmd_skill(args); return True
+    if cmd == "/profile":
+        cmd_profile(args); return True
     if cmd == "/mode":
-        console.print(f"\n  [dim]Current mode: [bold cyan]{_mode}[/]\n")
+        console.print(f"\n  [dim]  Mode: [bold cyan]{_mode}[/] | Version: [cyan]v{VERSION}[/]\n")
         return True
     if cmd == "/voice":
         _mode = "voice"
         console.print("\n  [cyan]  Switched to VOICE INPUT mode.[/]")
-        console.print("  [dim]  Speak after the prompt. Press Enter to start recording.[/]\n")
+        console.print("  [dim]  Press Enter to start recording.[/]\n")
         return True
     if cmd == "/text":
         _mode = "text"

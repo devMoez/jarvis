@@ -1,5 +1,7 @@
 from typing import Any
 from config import SHORT_TERM_MAX_TURNS, SYSTEM_PROMPT
+from core.skills import get_skills_prompt
+from core.profile import get_profile_prompt
 
 
 class ConversationHistory:
@@ -28,8 +30,14 @@ class ConversationHistory:
 
     def get_messages(self, memory_context: str = "") -> list[dict]:
         system = SYSTEM_PROMPT
+        profile = get_profile_prompt()
+        if profile:
+            system += f"\n\n{profile}"
+        skills = get_skills_prompt()
+        if skills:
+            system += f"\n\n{skills}"
         if memory_context:
-            system += f"\n\n[Relevant memories about this user]\n{memory_context}"
+            system += f"\n\n[Relevant memories]\n{memory_context}"
         return [{"role": "system", "content": system}] + list(self._messages)
 
     def _trim(self) -> None:
