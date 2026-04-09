@@ -20,6 +20,10 @@ logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
 
 sys.stderr = io.TextIOWrapper(open(os.devnull, "wb"), encoding="utf-8")
 
+# ── Enable ANSI colors on Windows terminal ────────────────────────────────────
+import colorama
+colorama.init(autoreset=False)
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -28,9 +32,10 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 from rich.rule import Rule
-from rich.table import Table
 
-console = Console(force_terminal=True, highlight=False)
+from version import VERSION, API_PROVIDER, AUTHOR
+
+console = Console(force_terminal=True, color_system="256", highlight=False)
 
 if not os.getenv("OPENROUTER_API_KEY"):
     console.print("[red]  ERROR: OPENROUTER_API_KEY not set in .env[/]")
@@ -117,13 +122,16 @@ def print_banner():
     console.print()
     console.print(Panel(
         Text.assemble(
-            ("  J A R V I S \n", "bold cyan"),
-            ("  AI Personal Assistant", "dim white"),
+            ("  J A R V I S \n",          "bold cyan"),
+            (f"  v{VERSION}",              "cyan"),
+            (f"  |  {API_PROVIDER}",       "dim cyan"),
+            (f"  |  Powered by {AUTHOR}\n","dim white"),
+            ("  AI Personal Assistant",    "dim white"),
         ),
         border_style="cyan",
         box=box.DOUBLE,
         expand=False,
-        padding=(1, 6),
+        padding=(1, 4),
     ))
     console.print()
 
