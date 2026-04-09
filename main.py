@@ -560,39 +560,62 @@ def voice_input_cycle() -> str | None:
     console.print(f"  [bold white]You[/] [dim white]>[/] [white]{sanitize(text)}[/]")
     return text
 
-# ── Main loop ─────────────────────────────────────────────────────────────────
+# ── Main loop — queue-based, input thread always live ─────────────────────────
 def main_loop():
     global _running, _mode
 
-    while _running:
-        try:
-            if _mode == "voice":
-                input("  [dim]Press Enter to speak...[/] ")
-                user_text = voice_input_cycle()
-                if not user_text:
-                    continue
-            else:
+    import queue as _queue
+    msg_queue: _queue.Queue[str] = _queue.Queue()
+    jarvis_busy = threading.Event()   # set while Jarvis is responding
+
+    def _input_reader():
+        """Runs in its own thread — always shows prompt, queues messages."""
+        while _running:
+            try:
                 raw = input("  You > ").strip()
                 if not raw:
                     continue
+
                 if raw.startswith("/"):
-                    if handle_slash(raw):
-                        continue
-                    else:
-                        console.print(f"  [dim red]Unknown command. Type /help for help.[/]")
-                        continue
+                    # Slash commands run immediately (they're instant)
+                    if not handle_slash(raw):
+                        _raw(f"\r  {DIM}Unknown command — /help for help{RESET}\n")
+                    continue
+
                 if raw.lower() in ("exit", "quit", "bye"):
                     handle_slash("/quit")
-                    break
-                user_text = raw
+                    return
 
+                # If Jarvis is mid-response, show a queued indicator
+                if jarvis_busy.is_set():
+                    _raw(f"  {DIM}[queued]{RESET}\n")
+
+                msg_queue.put(raw)
+
+            except (EOFError, KeyboardInterrupt):
+                _running = False
+                msg_queue.put(None)   # sentinel to unblock get()
+                break
+
+    input_thread = threading.Thread(target=_input_reader, daemon=True, name="InputReader")
+    input_thread.start()
+
+    while _running:
+        try:
+            user_text = msg_queue.get(timeout=0.3)
+        except _queue.Empty:
+            continue
+
+        if user_text is None:   # sentinel — quit
+            break
+
+        jarvis_busy.set()
+        try:
             response = ask_streaming(user_text)
-            # TTS in background so prompt returns immediately
             threading.Thread(target=speak, args=(response,), daemon=True).start()
             extract_and_store_async(user_text, response)
-
-        except (KeyboardInterrupt, EOFError):
-            break
+        finally:
+            jarvis_busy.clear()
 
     console.print("\n  [dim]Jarvis offline.[/]\n")
 
