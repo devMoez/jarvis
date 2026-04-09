@@ -404,10 +404,53 @@ def cmd_profile(args: list[str] = []):
     console.print()
     console.print("  [dim]  /profile set name <name>  |  /profile set timezone <tz>  |  /profile pref <key> <val>[/]\n")
 
-# ── Tool status display ───────────────────────────────────────────────────────
-def print_tool_event(tool_name: str):
-    label, color = TOOL_LABELS.get(tool_name, ("TOOL", "dim"))
-    console.print(f"  [{color}][{label}][/{color}]", end="\r")
+# ── Raw stdout write (bypasses Rich buffering, works on Windows) ──────────────
+def _raw(text: str, end: str = "") -> None:
+    sys.stdout.write(text + end)
+    sys.stdout.flush()
+
+def _clear_line() -> None:
+    sys.stdout.write("\r" + " " * 50 + "\r")
+    sys.stdout.flush()
+
+# ANSI color codes (work after colorama.init())
+CYAN    = "\033[96m"
+DIM     = "\033[2m"
+BOLD    = "\033[1m"
+RESET   = "\033[0m"
+
+# Tool label → ANSI color
+TOOL_ANSI = {
+    "search_web":        "\033[96m",   # bright cyan
+    "scrape_page":       "\033[36m",   # cyan
+    "open_url":          "\033[94m",   # blue
+    "open_app":          "\033[94m",   # blue
+    "run_command":       "\033[93m",   # yellow
+    "read_file":         "\033[37m",   # white
+    "write_file":        "\033[92m",   # green
+    "delete_file":       "\033[91m",   # red
+    "move_file":         "\033[95m",   # magenta
+    "copy_file":         "\033[95m",   # magenta
+    "list_directory":    "\033[37m",   # white
+    "search_files":      "\033[36m",   # cyan
+    "get_system_info":   "\033[94m",   # blue
+    "remember":          "\033[96m",   # bright cyan
+    "send_notification": "\033[93m",   # yellow
+    "install_software":  "\033[92m",   # green
+    "system_power":      "\033[91m",   # red
+}
+
+def _spinner_thread(stop_event: threading.Event, status_ref: list) -> None:
+    """Single spinner thread. Reads status_ref[0] for current status label."""
+    frames = ["|", "/", "-", "\\"]
+    i = 0
+    while not stop_event.is_set():
+        label = status_ref[0]
+        sys.stdout.write(f"\r  {DIM}{frames[i % 4]} {label}{RESET}   ")
+        sys.stdout.flush()
+        i += 1
+        time.sleep(0.1)
+    _clear_line()
 
 # ── Streaming response ────────────────────────────────────────────────────────
 def ask_streaming(user_text: str) -> str:
@@ -415,50 +458,42 @@ def ask_streaming(user_text: str) -> str:
     gen = orchestrator.process_stream(user_text, memory_context=memory_context)
 
     full = ""
-    first_token = True
-    spinner_stop = threading.Event()
-
-    def spin():
-        frames = [".  ", ".. ", "..."]
-        i = 0
-        while not spinner_stop.is_set():
-            console.print(f"\r  [dim cyan]thinking{frames[i % 3]}[/]", end="")
-            i += 1
-            time.sleep(0.35)
-        console.print("\r" + " " * 30 + "\r", end="")
-
-    spin_thread = threading.Thread(target=spin, daemon=True)
-    spin_thread.start()
-
     header_printed = False
+    status_ref = ["thinking..."]
+    stop_spin = threading.Event()
+
+    spin_thread = threading.Thread(target=_spinner_thread, args=(stop_spin, status_ref), daemon=True)
+    spin_thread.start()
 
     for token in gen:
         if token.startswith(TOOL_EVENT_PREFIX):
             tool_name = token[len(TOOL_EVENT_PREFIX):]
-            spinner_stop.set()
-            spin_thread.join()
-            spinner_stop = threading.Event()
-            print_tool_event(tool_name)
-            # restart spinner for next round
-            spin_thread = threading.Thread(target=spin, daemon=True)
-            spin_thread.start()
+            label, _ = TOOL_LABELS.get(tool_name, ("TOOL", "dim"))
+            color = TOOL_ANSI.get(tool_name, DIM)
+            status_ref[0] = f"{color}[{label}]{RESET}"
             continue
 
-        if first_token:
-            spinner_stop.set()
-            spin_thread.join()
-            first_token = False
-            console.print("\r" + " " * 30 + "\r", end="")
-
+        # First real token — kill spinner, print header
         if not header_printed:
-            console.print(f"\n  [bold cyan]Jarvis[/] [dim cyan]>[/] ", end="")
+            stop_spin.set()
+            spin_thread.join()
+            _clear_line()
+            _raw(f"\n  {BOLD}{CYAN}Jarvis{RESET} {DIM}>{RESET} ")
             header_printed = True
 
-        console.print(sanitize(token), end="")
+        clean = sanitize(token)
+        _raw(clean)
         full += token
 
-    console.print("\n")
-    spinner_stop.set()
+    # Ensure spinner is stopped
+    if not stop_spin.is_set():
+        stop_spin.set()
+        spin_thread.join()
+        _clear_line()
+
+    if header_printed:
+        _raw("\n\n")
+
     return full
 
 # ── Slash command router ──────────────────────────────────────────────────────
