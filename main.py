@@ -454,8 +454,13 @@ def _spinner_thread(stop_event: threading.Event, status_ref: list) -> None:
 
 # ── Streaming response ────────────────────────────────────────────────────────
 def ask_streaming(user_text: str) -> str:
-    memory_context = retrieve(user_text)
-    gen = orchestrator.process_stream(user_text, memory_context=memory_context)
+    # Fetch memory in background while spinner starts — no blocking wait
+    mem_result: list[str] = [""]
+    mem_done = threading.Event()
+    def _fetch_mem():
+        mem_result[0] = retrieve(user_text)
+        mem_done.set()
+    threading.Thread(target=_fetch_mem, daemon=True).start()
 
     full = ""
     header_printed = False
@@ -464,6 +469,10 @@ def ask_streaming(user_text: str) -> str:
 
     spin_thread = threading.Thread(target=_spinner_thread, args=(stop_spin, status_ref), daemon=True)
     spin_thread.start()
+
+    # Wait for memory (usually done in <1s, spinner already running)
+    mem_done.wait(timeout=3)
+    gen = orchestrator.process_stream(user_text, memory_context=mem_result[0])
 
     for token in gen:
         if token.startswith(TOOL_EVENT_PREFIX):
