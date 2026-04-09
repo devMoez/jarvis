@@ -16,10 +16,14 @@ env/
 dist/
 build/
 
-# Data & models (large files)
+# Data — exclude large/generated, keep config files
 data/chroma_db/
 data/logs/
 models/wake_word/*.onnx
+
+# Keep these data files in git
+!data/skills.json
+!data/profile.json
 
 # IDE
 .vscode/
