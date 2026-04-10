@@ -50,6 +50,7 @@ from audio.tts import speak
 from audio.wake_word import start_listening, stop_listening
 from memory.long_term import retrieve, remember
 from memory.extractor import extract_and_store_async
+from memory.patterns import pop_suggestions
 from core.skills import list_skills, add_skill, remove_skill, clear_skills
 from core.profile import get_profile, set_field, set_preference, clear_field
 from core.conversation import set_persona, get_persona
@@ -231,6 +232,10 @@ def cmd_help():
             ("/memory remove <n>",   "Remove memory by number"),
             ("/memory clear",        "Wipe all memories"),
         ],
+        "Learning": [
+            ("/learn",               "Show detected behavior patterns"),
+            ("/learn save <n>",      "Save a detected pattern as a permanent skill"),
+        ],
         "Skills": [
             ("/skill",               "List persistent behaviors"),
             ("/skill add <text>",    "Add a permanent behavior Jarvis always follows"),
@@ -359,6 +364,30 @@ def cmd_memory(args: list[str] = []):
         console.print("  [dim]  /memory add <fact>  |  /memory remove <n>  |  /memory clear[/]\n")
     except Exception as e:
         console.print(f"  [red]  Could not load memories: {e}[/]")
+
+# ── /learn ────────────────────────────────────────────────────────────────────
+def cmd_learn():
+    """Show all detected behavioral patterns and let user save any as skills."""
+    from memory.patterns import all_patterns
+    data = all_patterns()
+    if not data:
+        console.print("\n  [dim]  No patterns detected yet. Keep talking to Jarvis.[/]\n")
+        return
+
+    console.print()
+    console.print(f"  [bold yellow]  Detected Patterns[/]")
+    console.print(f"  {GOLD}{'─' * 50}{RESET}")
+    items = sorted(data.items(), key=lambda x: x[1]["count"], reverse=True)
+    for i, (key, entry) in enumerate(items, 1):
+        saved = "[green]✓ skill[/]" if entry.get("suggested") and _skill_exists(entry["description"]) else f"[dim]seen {entry['count']}×[/]"
+        console.print(f"  [yellow]{i:>2}.[/] [white]{sanitize(entry['description'])}[/]  {saved}")
+    console.print()
+    console.print("  [dim]  /learn save <n>  — save pattern as a permanent skill[/]\n")
+
+
+def _skill_exists(description: str) -> bool:
+    return any(s["instruction"] == description for s in list_skills())
+
 
 # ── /skill ────────────────────────────────────────────────────────────────────
 def cmd_skill(args: list[str] = []):
@@ -520,6 +549,23 @@ def handle_slash(raw: str) -> bool:
         print_banner(); return True
     if cmd in ("/memory", "/mem"):
         cmd_memory(args); return True
+    if cmd in ("/learn", "/patterns"):
+        if args and args[0].lower() == "save" and len(args) > 1:
+            from memory.patterns import all_patterns
+            try:
+                idx = int(args[1]) - 1
+                items = sorted(all_patterns().items(), key=lambda x: x[1]["count"], reverse=True)
+                if 0 <= idx < len(items):
+                    desc = items[idx][1]["description"]
+                    skill = add_skill(desc)
+                    _raw(f"\n  {AMBER}Skill #{skill['id']} saved:{RESET} {DIM}{sanitize(desc)}{RESET}\n\n")
+                else:
+                    _raw(f"  {DIM}No pattern at that number.{RESET}\n")
+            except ValueError:
+                _raw(f"  {DIM}Usage: /learn save <number>{RESET}\n")
+        else:
+            cmd_learn()
+        return True
     if cmd in ("/skill", "/skills"):
         cmd_skill(args); return True
     if cmd == "/profile":
@@ -587,6 +633,19 @@ def main_loop():
     else:
         _raw(f"  {DIM}Telegram not configured — add TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_ID to .env to enable.{RESET}\n")
 
+    # Pending skill suggestions waiting to be shown to the user
+    _pending_suggestions: list[str] = []
+    _suggestions_lock = threading.Lock()
+
+    def _queue_suggestions_after_delay(delay: float = 2.5):
+        """Wait for extractor to finish, then collect any new suggestions."""
+        import time as _time
+        _time.sleep(delay)
+        suggestions = pop_suggestions()
+        if suggestions:
+            with _suggestions_lock:
+                _pending_suggestions.extend(suggestions)
+
     # ── Processor thread: handles messages while input stays live ─────────────
     def _processor():
         while _running:
@@ -604,13 +663,38 @@ def main_loop():
             response = ask_streaming(user_text)
             threading.Thread(target=speak, args=(response,), daemon=True).start()
             extract_and_store_async(user_text, response)
+            # Collect suggestions a moment after extractor finishes
+            threading.Thread(target=_queue_suggestions_after_delay, daemon=True).start()
             if tg_chat_id and _telegram.enabled:
                 _telegram.send(tg_chat_id, response)
 
     threading.Thread(target=_processor, daemon=True, name="Processor").start()
 
+    def _show_pending_suggestions():
+        """Display queued skill suggestions and ask user to confirm."""
+        with _suggestions_lock:
+            suggestions = list(_pending_suggestions)
+            _pending_suggestions.clear()
+        for suggestion in suggestions:
+            _raw(f"\n  {GOLD}★ LEARN{RESET}  {DIM}{sanitize(suggestion)}{RESET}\n")
+            _raw(f"  {DIM}Save as a permanent skill? (y / n){RESET}\n")
+            _raw(f"  {AMBER}›{RESET} {WHITE}")
+            try:
+                answer = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+            _raw(RESET)
+            if answer in ("y", "yes"):
+                skill = add_skill(suggestion)
+                _raw(f"  {AMBER}Skill #{skill['id']} saved.{RESET}\n\n")
+            else:
+                _raw(f"  {DIM}Skipped.{RESET}\n\n")
+
     # ── Input loop: main thread — shows › prompt instantly after each send ────
     while _running:
+        # Show any pending skill suggestions before next prompt
+        _show_pending_suggestions()
+
         try:
             raw = _read_input().strip()
         except (EOFError, KeyboardInterrupt):
