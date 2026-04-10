@@ -1,7 +1,17 @@
 from typing import Any
-from config import SHORT_TERM_MAX_TURNS, SYSTEM_PROMPT
+from config import SHORT_TERM_MAX_TURNS, SYSTEM_PROMPT, PERSONA_PROMPTS
 from core.skills import get_skills_prompt
 from core.profile import get_profile_prompt
+
+# Active persona — set by /funny, /stealth, /think, /roast, /normal
+_active_persona: str | None = None
+
+def set_persona(name: str | None) -> None:
+    global _active_persona
+    _active_persona = name
+
+def get_persona() -> str | None:
+    return _active_persona
 
 
 class ConversationHistory:
@@ -30,6 +40,8 @@ class ConversationHistory:
 
     def get_messages(self, memory_context: str = "") -> list[dict]:
         system = SYSTEM_PROMPT
+        if _active_persona and _active_persona in PERSONA_PROMPTS:
+            system += f"\n\n{PERSONA_PROMPTS[_active_persona]}"
         profile = get_profile_prompt()
         if profile:
             system += f"\n\n{profile}"

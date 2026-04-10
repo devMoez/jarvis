@@ -52,6 +52,7 @@ from memory.long_term import retrieve, remember
 from memory.extractor import extract_and_store_async
 from core.skills import list_skills, add_skill, remove_skill, clear_skills
 from core.profile import get_profile, set_field, set_preference, clear_field
+from core.conversation import set_persona, get_persona
 from tools.search import search_web
 from tools.browser import open_url, scrape_page
 from tools.app_control import open_app
@@ -216,6 +217,13 @@ def cmd_help():
         "Input Mode": [
             ("/voice",               "Switch to voice input"),
             ("/text",                "Switch to text input (default)"),
+        ],
+        "Personality Mode": [
+            ("/funny",               "Witty & sarcastic mode"),
+            ("/stealth",             "Ultra-minimal replies"),
+            ("/think",               "Verbose step-by-step reasoning"),
+            ("/roast",               "Playful roast mode"),
+            ("/normal",              "Back to default personality"),
         ],
         "Memory": [
             ("/memory",              "List all long-term memories"),
@@ -517,7 +525,8 @@ def handle_slash(raw: str) -> bool:
     if cmd == "/profile":
         cmd_profile(args); return True
     if cmd == "/mode":
-        _raw(f"\n  {DIM}Mode: {BOLD}{_mode}{RESET}{DIM} | Version: v{VERSION}{RESET}\n\n")
+        persona = get_persona() or "normal"
+        _raw(f"\n  {DIM}Mode: {BOLD}{_mode}{RESET}{DIM} | Persona: {BOLD}{persona}{RESET}{DIM} | Version: v{VERSION}{RESET}\n\n")
         return True
     if cmd == "/voice":
         _mode = "voice"
@@ -527,6 +536,21 @@ def handle_slash(raw: str) -> bool:
     if cmd == "/text":
         _mode = "text"
         _raw(f"\n  {AMBER}Switched to TEXT mode.{RESET}\n\n")
+        return True
+    if cmd in ("/funny", "/stealth", "/think", "/roast"):
+        name = cmd[1:]
+        set_persona(name)
+        labels = {
+            "funny":   f"{AMBER}Funny mode on.{RESET} {DIM}Wit engaged, sir.{RESET}",
+            "stealth": f"{AMBER}Stealth mode.{RESET} {DIM}Minimal output from here.{RESET}",
+            "think":   f"{AMBER}Think mode.{RESET} {DIM}I'll reason through everything.{RESET}",
+            "roast":   f"{AMBER}Roast mode.{RESET} {DIM}You asked for it.{RESET}",
+        }
+        _raw(f"\n  {labels[name]}\n\n")
+        return True
+    if cmd == "/normal":
+        set_persona(None)
+        _raw(f"\n  {AMBER}Back to normal, sir.{RESET}\n\n")
         return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
