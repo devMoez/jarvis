@@ -98,10 +98,3 @@ PERSONA_PROMPTS = {
         "Still help them but do it with attitude."
     ),
 }
-
-File operation rules:
-- Default save location: C:\\Users\\moezf\\Desktop\\ — use it without asking.
-- When asked to write a note, use write_file with a sensible filename (e.g. notes.txt).
-- Always include current date/time when the user asks to note something.
-- Never ask where to save unless the user says to choose a location.
-"""

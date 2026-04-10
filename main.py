@@ -130,6 +130,31 @@ TOOL_ANSI = {
     "system_power":      RED,
 }
 
+# Plain-text status labels shown in spinner (no ANSI — spinner colors them)
+TOOL_STATUS = {
+    "search_web":        "searching...",
+    "scrape_page":       "fetching page...",
+    "open_url":          "opening url...",
+    "open_app":          "launching app...",
+    "run_command":       "running command...",
+    "read_file":         "reading file...",
+    "write_file":        "writing file...",
+    "delete_file":       "deleting...",
+    "move_file":         "moving file...",
+    "copy_file":         "copying file...",
+    "list_directory":    "listing directory...",
+    "search_files":      "searching files...",
+    "get_system_info":   "getting system info...",
+    "remember":          "saving to memory...",
+    "send_notification": "sending notification...",
+    "install_software":  "installing...",
+    "system_power":      "power action...",
+}
+
+# Colors cycled by the spinner for status labels
+_STATUS_COLORS = [AMBER, GOLD, CYAN, VIOLET, GREEN, PINK, TEAL, CORAL]
+_COLOR_CHANGE_TICKS = 15  # ~1.2 s at 0.08 s/frame
+
 # ── Register tools ────────────────────────────────────────────────────────────
 registry = ToolRegistry()
 registry.register("search_web",        search_web)
@@ -198,7 +223,7 @@ def print_banner():
 
 # ── Styled input with borders ─────────────────────────────────────────────────
 def _read_input() -> str:
-    _raw(f"\n  {CYAN}›{RESET} {WHITE}")
+    _raw(f"\n  {CYAN}{BOLD}You{RESET}  {WHITE}")
     result = input()
     _raw(RESET)
     return result
@@ -465,17 +490,24 @@ def cmd_custom(args: list[str] = []):
             _raw(f"  {TEAL}/{c['name']:<18}{RESET}  {DIM}{sanitize(c['desc'])}{RESET}\n")
     _raw(f"\n  {DIM}/cmd add <name> <prompt>  ·  /cmd remove <name>{RESET}\n\n")
 
-# ── Spinner ───────────────────────────────────────────────────────────────────
+# ── Spinner (cycling colors) ──────────────────────────────────────────────────
 def _spinner_thread(stop_event: threading.Event, status_ref: list) -> None:
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     i = 0
-    sys.stdout.write("\n")   # push below the › line so \r doesn't overwrite it
+    color_i = 0
+    tick = 0
+    sys.stdout.write("\n")   # push below the You line so \r doesn't overwrite it
     sys.stdout.flush()
     while not stop_event.is_set():
+        color = _STATUS_COLORS[color_i % len(_STATUS_COLORS)]
         label = status_ref[0]
-        sys.stdout.write(f"\r  {AMBER}{frames[i % len(frames)]}{RESET} {DIM}{label}{RESET}   ")
+        sys.stdout.write(f"\r  {color}{frames[i % len(frames)]}{RESET}  {color}{label}{RESET}   ")
         sys.stdout.flush()
         i += 1
+        tick += 1
+        if tick >= _COLOR_CHANGE_TICKS:
+            color_i += 1
+            tick = 0
         time.sleep(0.08)
     _clear_line()
 
@@ -504,16 +536,14 @@ def ask_streaming(user_text: str) -> str:
     for token in gen:
         if token.startswith(TOOL_EVENT_PREFIX):
             tool_name = token[len(TOOL_EVENT_PREFIX):]
-            label, _ = TOOL_LABELS.get(tool_name, ("TOOL", "dim"))
-            color = TOOL_ANSI.get(tool_name, DIM)
-            status_ref[0] = f"{color}[{label}]{RESET}"
+            status_ref[0] = TOOL_STATUS.get(tool_name, "working...")
             continue
 
         if not header_printed:
             stop_spin.set()
             spin_thread.join()
             _clear_line()
-            _raw(f"  {AMBER}{BOLD}Jarvis{RESET} {CYAN}›{RESET} ")
+            _raw(f"  {AMBER}{BOLD}Jarvis{RESET}  ")
             header_printed = True
 
         clean = sanitize(token)
@@ -622,20 +652,18 @@ def main_loop():
     global _running, _mode
 
     import queue as _queue
-    msg_queue: _queue.Queue = _queue.Queue()
+    tg_queue: _queue.Queue = _queue.Queue()
 
-    # Start Telegram — puts (text, chat_id) tuples into msg_queue
+    # Start Telegram — puts (text, chat_id) tuples into tg_queue
     if _telegram.enabled:
-        _telegram.start(msg_queue)
+        _telegram.start(tg_queue)
     else:
         _raw(f"  {DIM}Telegram not configured — add TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_ID to .env to enable.{RESET}\n")
 
-    # Pending skill suggestions waiting to be shown to the user
     _pending_suggestions: list[str] = []
     _suggestions_lock = threading.Lock()
 
     def _queue_suggestions_after_delay(delay: float = 2.5):
-        """Wait for extractor to finish, then collect any new suggestions."""
         import time as _time
         _time.sleep(delay)
         suggestions = pop_suggestions()
@@ -643,32 +671,28 @@ def main_loop():
             with _suggestions_lock:
                 _pending_suggestions.extend(suggestions)
 
-    # ── Processor thread: handles messages while input stays live ─────────────
-    def _processor():
+    # ── Telegram processor thread (only for remote TG messages) ───────────────
+    def _tg_processor():
         while _running:
             try:
-                item = msg_queue.get(timeout=0.3)
+                item = tg_queue.get(timeout=0.3)
             except _queue.Empty:
                 continue
             if item is None:
                 break
-            if isinstance(item, tuple):
-                user_text, tg_chat_id = item
-                _raw(f"\n  {GOLD}[TG]{RESET} {AMBER}›{RESET} {WHITE}{sanitize(user_text)}{RESET}\n")
-            else:
-                user_text, tg_chat_id = item, None
+            user_text, tg_chat_id = item
+            _raw(f"\n  {GOLD}[TG]{RESET}  {WHITE}{sanitize(user_text)}{RESET}\n")
             response = ask_streaming(user_text)
             threading.Thread(target=speak, args=(response,), daemon=True).start()
             extract_and_store_async(user_text, response)
-            # Collect suggestions a moment after extractor finishes
             threading.Thread(target=_queue_suggestions_after_delay, daemon=True).start()
-            if tg_chat_id and _telegram.enabled:
+            if _telegram.enabled:
                 _telegram.send(tg_chat_id, response)
 
-    threading.Thread(target=_processor, daemon=True, name="Processor").start()
+    if _telegram.enabled:
+        threading.Thread(target=_tg_processor, daemon=True, name="TGProcessor").start()
 
     def _show_pending_suggestions():
-        """Display queued skill suggestions and ask user to confirm."""
         with _suggestions_lock:
             suggestions = list(_pending_suggestions)
             _pending_suggestions.clear()
@@ -687,9 +711,8 @@ def main_loop():
             else:
                 _raw(f"  {DIM}Skipped.{RESET}\n\n")
 
-    # ── Input loop: main thread — shows › prompt instantly after each send ────
+    # ── Input loop: synchronous — next prompt only after response is done ─────
     while _running:
-        # Show any pending skill suggestions before next prompt
         _show_pending_suggestions()
 
         try:
@@ -701,23 +724,30 @@ def main_loop():
             continue
 
         if raw.startswith("/"):
-            # Check custom commands first before unknown-command fallback
             custom = get_command(raw[1:].split()[0])
             if custom:
                 _raw(f"  {TEAL}◆ {raw.split()[0]}{RESET}  {DIM}→ {sanitize(custom['prompt'])}{RESET}\n")
-                msg_queue.put(custom["prompt"])
+                response = ask_streaming(custom["prompt"])
+                threading.Thread(target=speak, args=(response,), daemon=True).start()
+                extract_and_store_async(custom["prompt"], response)
+                threading.Thread(target=_queue_suggestions_after_delay, daemon=True).start()
                 continue
             if not handle_slash(raw):
-                _raw(f"  {DIM}Unknown command — /help for help{RESET}\n")
+                _raw(f"  {CORAL}Unknown command{RESET}  {DIM}{raw}{RESET}  {CYAN}/help{RESET} {DIM}for help{RESET}\n")
             continue
 
         if raw.lower() in ("exit", "quit", "bye"):
             handle_slash("/quit")
             break
 
-        msg_queue.put(raw)   # queued — next › shows immediately
+        # Synchronous — blocks here until response is fully printed
+        response = ask_streaming(raw)
+        threading.Thread(target=speak, args=(response,), daemon=True).start()
+        extract_and_store_async(raw, response)
+        threading.Thread(target=_queue_suggestions_after_delay, daemon=True).start()
 
-    msg_queue.put(None)
+    if _telegram.enabled:
+        tg_queue.put(None)
     _raw(f"\n  {DIM}Jarvis offline.{RESET}\n\n")
 
 # ── Wake-word voice mode ──────────────────────────────────────────────────────

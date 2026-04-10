@@ -38,3 +38,8 @@ desktop.ini
 
 # Whisper cache (downloaded automatically)
 ~/.cache/huggingface/
+
+# IDE & local tools
+.claude/
+data/session.json
+
