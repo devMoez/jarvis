@@ -141,8 +141,6 @@ registry.register("search_files",      search_files)
 
 orchestrator = Orchestrator(tool_registry=registry)
 
-# Pre-warm ChromaDB in background
-threading.Thread(target=lambda: retrieve("warmup"), daemon=True).start()
 
 # ── State ─────────────────────────────────────────────────────────────────────
 _running   = True
@@ -186,37 +184,11 @@ def print_banner():
     _raw(f"  {BAR}\n\n")
 
 # ── Styled input with borders ─────────────────────────────────────────────────
-try:
-    from prompt_toolkit import prompt as _pt_prompt
-    from prompt_toolkit.styles import Style as _PtStyle
-
-    _PT_STYLE = _PtStyle.from_dict({
-        "prompt": "#ffaf00 bold",   # amber › and border
-        "":       "#ffffff",        # white input text (highlighted)
-    })
-    _USE_PT = True
-except ImportError:
-    _USE_PT = False
-
 def _read_input() -> str:
-    """Show top border, styled › prompt, bottom border after enter."""
-    border = f"  {GOLD}{'─' * 56}{RESET}"
-    _raw(f"\n{border}\n")
-    if _USE_PT:
-        try:
-            result = _pt_prompt(
-                [("class:prompt", "  › ")],
-                style=_PT_STYLE,
-            )
-            _raw(f"{border}\n")
-            return result
-        except (EOFError, KeyboardInterrupt):
-            raise
-    else:
-        _raw(f"  {AMBER}›{RESET} ")
-        result = input()
-        _raw(f"{border}\n")
-        return result
+    _raw(f"\n  {AMBER}›{RESET} {WHITE}")
+    result = input()
+    _raw(RESET)
+    return result
 
 # ── /help ─────────────────────────────────────────────────────────────────────
 def cmd_help():
@@ -464,6 +436,8 @@ def cmd_profile(args: list[str] = []):
 def _spinner_thread(stop_event: threading.Event, status_ref: list) -> None:
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     i = 0
+    sys.stdout.write("\n")   # push below the › line so \r doesn't overwrite it
+    sys.stdout.flush()
     while not stop_event.is_set():
         label = status_ref[0]
         sys.stdout.write(f"\r  {AMBER}{frames[i % len(frames)]}{RESET} {DIM}{label}{RESET}   ")
@@ -506,7 +480,7 @@ def ask_streaming(user_text: str) -> str:
             stop_spin.set()
             spin_thread.join()
             _clear_line()
-            _raw(f"\n  {AMBER}{BOLD}Jarvis{RESET} {GOLD}›{RESET} ")
+            _raw(f"  {AMBER}{BOLD}Jarvis{RESET} {GOLD}›{RESET} ")
             header_printed = True
 
         clean = sanitize(token)
@@ -576,75 +550,63 @@ def voice_input_cycle() -> str | None:
     _raw(f"\n  {USER_CLR}›{RESET} {WHITE}{sanitize(text)}{RESET}\n")
     return text
 
-# ── Main loop — queue-based, input thread always live ─────────────────────────
+# ── Main loop ─────────────────────────────────────────────────────────────────
 def main_loop():
     global _running, _mode
 
     import queue as _queue
-    msg_queue: _queue.Queue[str] = _queue.Queue()
-    jarvis_busy = threading.Event()
+    msg_queue: _queue.Queue = _queue.Queue()
 
-    def _input_reader():
+    # Start Telegram — puts (text, chat_id) tuples into msg_queue
+    if _telegram.enabled:
+        _telegram.start(msg_queue)
+    else:
+        _raw(f"  {DIM}Telegram not configured — add TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_ID to .env to enable.{RESET}\n")
+
+    # ── Processor thread: handles messages while input stays live ─────────────
+    def _processor():
         while _running:
             try:
-                raw = _read_input().strip()
-                if not raw:
-                    continue
-
-                if raw.startswith("/"):
-                    if not handle_slash(raw):
-                        _raw(f"  {DIM}Unknown command — /help for help{RESET}\n")
-                    continue
-
-                if raw.lower() in ("exit", "quit", "bye"):
-                    handle_slash("/quit")
-                    return
-
-                if jarvis_busy.is_set():
-                    _raw(f"  {DIM}[queued]{RESET}\n")
-
-                msg_queue.put(raw)
-
-            except (EOFError, KeyboardInterrupt):
-                _running = False
-                msg_queue.put(None)
+                item = msg_queue.get(timeout=0.3)
+            except _queue.Empty:
+                continue
+            if item is None:
                 break
-
-    # Start Telegram bridge (no-op if TELEGRAM_BOT_TOKEN not set)
-    _telegram.start(msg_queue, reply_callback=None)   # reply_callback set below
-
-    input_thread = threading.Thread(target=_input_reader, daemon=True, name="InputReader")
-    input_thread.start()
-
-    if _telegram.enabled:
-        _raw(f"  {AMBER}Telegram bot active.{RESET} {DIM}Messages from your bot will be processed here.{RESET}\n\n")
-
-    while _running:
-        try:
-            item = msg_queue.get(timeout=0.3)
-        except _queue.Empty:
-            continue
-
-        if item is None:
-            break
-
-        # Unpack: terminal sends str, Telegram sends (str, chat_id)
-        if isinstance(item, tuple):
-            user_text, tg_chat_id = item
-        else:
-            user_text, tg_chat_id = item, None
-
-        jarvis_busy.set()
-        try:
+            if isinstance(item, tuple):
+                user_text, tg_chat_id = item
+                _raw(f"\n  {GOLD}[TG]{RESET} {AMBER}›{RESET} {WHITE}{sanitize(user_text)}{RESET}\n")
+            else:
+                user_text, tg_chat_id = item, None
             response = ask_streaming(user_text)
             threading.Thread(target=speak, args=(response,), daemon=True).start()
             extract_and_store_async(user_text, response)
-            # Send reply back to Telegram if this came from there
-            if tg_chat_id is not None and _telegram.enabled:
+            if tg_chat_id and _telegram.enabled:
                 _telegram.send(tg_chat_id, response)
-        finally:
-            jarvis_busy.clear()
 
+    threading.Thread(target=_processor, daemon=True, name="Processor").start()
+
+    # ── Input loop: main thread — shows › prompt instantly after each send ────
+    while _running:
+        try:
+            raw = _read_input().strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+
+        if not raw:
+            continue
+
+        if raw.startswith("/"):
+            if not handle_slash(raw):
+                _raw(f"  {DIM}Unknown command — /help for help{RESET}\n")
+            continue
+
+        if raw.lower() in ("exit", "quit", "bye"):
+            handle_slash("/quit")
+            break
+
+        msg_queue.put(raw)   # queued — next › shows immediately
+
+    msg_queue.put(None)
     _raw(f"\n  {DIM}Jarvis offline.{RESET}\n\n")
 
 # ── Wake-word voice mode ──────────────────────────────────────────────────────
