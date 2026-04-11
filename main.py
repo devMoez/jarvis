@@ -95,6 +95,7 @@ from tools.image_tools import (
     list_grade_styles as _grade_styles,
 )
 from tools.video_gen import text_to_video as _vid_text, image_to_video as _vid_image
+from tools.ai_detection import detect_image as _det_image, detect_text as _det_text, fmt_detection_result as _det_fmt
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -150,6 +151,7 @@ _KNOWN_CMDS = {
     "/schedule", "/organize",
     "/imagine", "/imggen", "/removebg", "/upscale", "/imganalyze", "/grade",
     "/vidgen", "/animate",
+    "/aidetect", "/isai",
 }
 
 
@@ -541,6 +543,11 @@ def cmd_help():
     _cmd_row("/transcribe <f> --lang <code>","Force language (e.g. fr, es, de)",   CYAN)
     _cmd_row("/listen",                "Record from mic and transcribe",             CYAN)
     _cmd_row("/listen --save",         "Record, transcribe, and save file",         CYAN)
+
+    _section("AI Detection", GREEN)
+    _cmd_row("/aidetect <image-path>",      "Detect if an image is AI-generated",          GREEN)
+    _cmd_row("/aidetect --text <text>",     "Detect if text is AI-generated",              GREEN)
+    _cmd_row("/aidetect --file <path>",     "Detect AI in a text file",                   GREEN)
 
     _section("Video Generation", CORAL)
     _cmd_row("/vidgen <prompt>",              "Text-to-video (Runway Gen-3 or Replicate)",  CORAL)
@@ -1663,6 +1670,61 @@ def cmd_animate(args: list):
     threading.Thread(target=_do, daemon=True).start()
 
 
+# ── /aidetect ─────────────────────────────────────────────────────────────────
+def cmd_aidetect(args: list, raw_text: str = ""):
+    """
+    /aidetect <image-path>          — detect if image is AI-generated
+    /aidetect --text <text>         — detect if text is AI-generated
+    /aidetect --file <path>         — detect a text file
+    """
+    if not args:
+        _raw(
+            f"\n  {BOLD}Usage:{RESET}\n"
+            f"  {DIM}/aidetect <image-path>       — image AI detection\n"
+            f"  /aidetect --text <text>      — text AI detection\n"
+            f"  /aidetect --file <path>      — detect text from file{RESET}\n\n"
+        )
+        return
+
+    if args[0] == "--text":
+        text = " ".join(args[1:])
+        if not text.strip():
+            _raw(f"  {CORAL}No text provided.{RESET}\n"); return
+        _raw(f"  {DIM}Analyzing text ({len(text)} chars)...{RESET}\n")
+        def _do_text():
+            result = _det_text(text)
+            _raw(f"\n{sanitize(_det_fmt(result, 'Text'))}\n\n")
+            _render(force=True)
+        threading.Thread(target=_do_text, daemon=True).start()
+        return
+
+    if args[0] == "--file":
+        if len(args) < 2:
+            _raw(f"  {DIM}Usage: /aidetect --file <path>{RESET}\n"); return
+        try:
+            text = open(args[1], encoding="utf-8").read()
+        except Exception as e:
+            _raw(f"  {CORAL}Could not read file: {e}{RESET}\n"); return
+        _raw(f"  {DIM}Analyzing {os.path.basename(args[1])} ({len(text)} chars)...{RESET}\n")
+        def _do_file():
+            result = _det_text(text)
+            _raw(f"\n{sanitize(_det_fmt(result, os.path.basename(args[1])))}\n\n")
+            _render(force=True)
+        threading.Thread(target=_do_file, daemon=True).start()
+        return
+
+    # Default: image detection
+    path = " ".join(args)
+    if not os.path.exists(path):
+        _raw(f"  {CORAL}File not found: {path}{RESET}\n"); return
+    _raw(f"  {DIM}Analyzing {os.path.basename(path)} for AI generation...{RESET}\n")
+    def _do_img():
+        result = _det_image(path)
+        _raw(f"\n{sanitize(_det_fmt(result, os.path.basename(path)))}\n\n")
+        _render(force=True)
+    threading.Thread(target=_do_img, daemon=True).start()
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1803,6 +1865,8 @@ def handle_slash(raw: str) -> bool:
         cmd_vidgen(args); return True
     if cmd == "/animate":
         cmd_animate(args); return True
+    if cmd in ("/aidetect", "/isai"):
+        cmd_aidetect(args, raw_text=" ".join(args)); return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
