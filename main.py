@@ -102,6 +102,11 @@ from tools.n8n_bridge import (
     n8n_ping as _n8n_ping, n8n_api_list_workflows as _n8n_workflows,
     parse_kv_args as _n8n_parse_kv,
 )
+from core.self_evolution import (
+    get_gaps as _evo_gaps, research_tool_idea as _evo_research,
+    build_tool as _evo_build, list_evolved_tools as _evo_list,
+    undo_evolved_tool as _evo_undo, record_gap as _evo_record_gap,
+)
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -159,6 +164,7 @@ _KNOWN_CMDS = {
     "/vidgen", "/animate",
     "/aidetect", "/isai",
     "/n8n",
+    "/evolve",
 }
 
 
@@ -550,6 +556,13 @@ def cmd_help():
     _cmd_row("/transcribe <f> --lang <code>","Force language (e.g. fr, es, de)",   CYAN)
     _cmd_row("/listen",                "Record from mic and transcribe",             CYAN)
     _cmd_row("/listen --save",         "Record, transcribe, and save file",         CYAN)
+
+    _section("Self-Evolution", VIOLET)
+    _cmd_row("/evolve gaps",              "Show recurring tool gaps Jarvis detected",   VIOLET)
+    _cmd_row("/evolve research <idea>",   "Research best implementation for a tool",    VIOLET)
+    _cmd_row("/evolve build <idea>",      "Auto-generate, write & register a new tool", VIOLET)
+    _cmd_row("/evolve list",              "List all auto-built evolved tools",           VIOLET)
+    _cmd_row("/evolve undo <name>",       "Remove an evolved tool",                     VIOLET)
 
     _section("n8n Automation", TEAL)
     _cmd_row("/n8n trigger <name|url> [k=v]", "Trigger an n8n workflow via webhook", TEAL)
@@ -1853,6 +1866,96 @@ def cmd_n8n(args: list):
     threading.Thread(target=_do_default, daemon=True).start()
 
 
+# ── /evolve ───────────────────────────────────────────────────────────────────
+def cmd_evolve(args: list):
+    """
+    /evolve gaps                  — show recurring tool gaps Jarvis couldn't handle
+    /evolve research <idea>       — research best implementation for a tool idea
+    /evolve build <idea>          — generate + write + register a new tool
+    /evolve list                  — list all auto-built (evolved) tools
+    /evolve undo <tool-name>      — remove an evolved tool
+    """
+    if not args or args[0] in ("help", ""):
+        _raw(
+            f"\n  {BOLD}{VIOLET}Self-Evolution System{RESET}\n\n"
+            f"  {DIM}/evolve gaps                 — show recurring capability gaps\n"
+            f"  /evolve research <idea>      — research best way to implement a tool\n"
+            f"  /evolve build <idea>         — generate, write & register a new tool\n"
+            f"  /evolve list                 — list all auto-built tools\n"
+            f"  /evolve undo <name>          — remove an evolved tool{RESET}\n\n"
+        )
+        return
+
+    sub = args[0].lower()
+
+    if sub == "gaps":
+        gaps = _evo_gaps(min_count=1)
+        if not gaps:
+            _raw(f"  {DIM}No tool gaps recorded yet.{RESET}\n\n")
+            return
+        _raw(f"\n  {VIOLET}{BOLD}Detected Tool Gaps:{RESET}\n")
+        for i, g in enumerate(gaps[:20], 1):
+            _raw(f"  {AMBER}{i:2d}.{RESET}  [{g['count']}×]  {DIM}{sanitize(g['description'][:80])}{RESET}\n")
+        _raw("\n")
+        return
+
+    if sub == "list":
+        tools = _evo_list()
+        if not tools:
+            _raw(f"  {DIM}No evolved tools yet.  Use /evolve build <idea> to create one.{RESET}\n\n")
+            return
+        _raw(f"\n  {VIOLET}{BOLD}Evolved Tools ({len(tools)}):{RESET}\n")
+        for t in tools:
+            _raw(f"  {GREEN}•{RESET}  {WHITE}{t['tool_name']}{RESET}  {DIM}({t['file']})  —  {t['idea'][:60]}{RESET}\n")
+        _raw("\n")
+        return
+
+    if sub == "undo" and len(args) >= 2:
+        name = args[1]
+        result = _evo_undo(name)
+        if result["success"]:
+            _raw(f"  {GREEN}✓  Evolved tool '{name}' removed.{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Error: {result['error']}{RESET}\n\n")
+        return
+
+    if sub == "research":
+        idea = " ".join(args[1:])
+        if not idea:
+            _raw(f"  {DIM}Usage: /evolve research <tool idea>{RESET}\n"); return
+        _raw(f"  {DIM}Researching: {idea}...{RESET}\n")
+        def _do_research():
+            brief = _evo_research(idea)
+            _raw(f"\n{sanitize(brief)}\n\n")
+            _render(force=True)
+        threading.Thread(target=_do_research, daemon=True).start()
+        return
+
+    if sub == "build":
+        idea = " ".join(args[1:])
+        if not idea:
+            _raw(f"  {DIM}Usage: /evolve build <tool idea>{RESET}\n"); return
+        _raw(f"  {DIM}Building tool: \"{idea}\"...{RESET}\n  {DIM}(Researching → Generating → Writing...){RESET}\n")
+        def _do_build():
+            # First research, then build
+            brief  = _evo_research(idea)
+            _raw(f"\n  {DIM}Research complete. Generating code...{RESET}\n")
+            result = _evo_build(idea, research_brief=brief)
+            if result["success"]:
+                _raw(
+                    f"\n  {GREEN}✓  Tool built:{RESET}  {WHITE}{result['tool_name']}{RESET}\n"
+                    f"  {DIM}File: {result['file']}{RESET}\n"
+                    f"\n  {AMBER}⚠  To use this tool, restart Jarvis so it loads the new module.{RESET}\n\n"
+                )
+            else:
+                _raw(f"  {CORAL}Build failed: {sanitize(result['error'])}{RESET}\n\n")
+            _render(force=True)
+        threading.Thread(target=_do_build, daemon=True).start()
+        return
+
+    _raw(f"  {DIM}Usage: /evolve [gaps|research|build|list|undo]{RESET}\n")
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1997,6 +2100,8 @@ def handle_slash(raw: str) -> bool:
         cmd_aidetect(args, raw_text=" ".join(args)); return True
     if cmd == "/n8n":
         cmd_n8n(args); return True
+    if cmd == "/evolve":
+        cmd_evolve(args); return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
