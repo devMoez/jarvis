@@ -67,6 +67,8 @@ from tools.search import search_web
 from tools.research import deep_research
 from tools.books import find_book
 from tools.wiki import wiki_search
+from tools.youtube import get_transcript as yt_transcript
+from tools.scholar import search_papers
 from tools.clipboard_mgr import start_tracking as _clip_start, get_history as _clip_history, paste_item as _clip_paste, clear_history as _clip_clear
 from tools.todo import add_todo, list_todos, done_todo, remove_todo, clear_done as clear_done_todos
 from tools.timer import start_timer as _start_timer
@@ -121,6 +123,7 @@ _KNOWN_CMDS = {
     "/search", "/research", "/book",
     "/wiki", "/stats", "/clips", "/clip",
     "/todo", "/timer", "/remind",
+    "/yt", "/transcript", "/papers",
 }
 
 
@@ -149,6 +152,8 @@ TOOL_LABELS = {
     "deep_research":       ("RESEARCH", "magenta"),
     "find_book":           ("BOOKS",    "green"),
     "wiki_search":         ("WIKI",     "cyan"),
+    "yt_transcript":       ("YOUTUBE",  "red"),
+    "search_papers":       ("SCHOLAR",  "blue"),
 }
 
 TOOL_ANSI = {
@@ -175,6 +180,8 @@ TOOL_ANSI = {
     "deep_research":       VIOLET,
     "find_book":           GREEN,
     "wiki_search":         CYAN,
+    "yt_transcript":       CORAL,
+    "search_papers":       BLUE,
 }
 
 # Plain-text status labels shown in spinner (no ANSI — spinner colors them)
@@ -202,6 +209,8 @@ TOOL_STATUS = {
     "deep_research":       "researching topic...",
     "find_book":           "searching LibGen...",
     "wiki_search":         "searching Wikipedia...",
+    "yt_transcript":       "fetching transcript...",
+    "search_papers":       "searching papers...",
 }
 
 # Colors cycled by the spinner for status labels
@@ -233,6 +242,8 @@ registry.register("browser_with_session", browser_with_session)
 registry.register("deep_research",        deep_research)
 registry.register("find_book",            find_book)
 registry.register("wiki_search",          wiki_search)
+registry.register("yt_transcript",        yt_transcript)
+registry.register("search_papers",        search_papers)
 
 # Start clipboard background tracker
 _clip_start()
@@ -1115,6 +1126,16 @@ def handle_slash(raw: str) -> bool:
         if not args:
             _raw(f"  {DIM}Usage: /wiki <topic>{RESET}\n"); return True
         msg_queue.put(f"Look up on Wikipedia: {' '.join(args)}")
+        return True
+    if cmd in ("/yt", "/transcript"):
+        if not args:
+            _raw(f"  {DIM}Usage: /yt <youtube-url-or-id>{RESET}\n"); return True
+        msg_queue.put(f"Get the YouTube transcript for: {args[0]}")
+        return True
+    if cmd == "/papers":
+        if not args:
+            _raw(f"  {DIM}Usage: /papers <query>{RESET}\n"); return True
+        msg_queue.put(f"Search academic papers on Semantic Scholar for: {' '.join(args)}")
         return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")

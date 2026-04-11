@@ -366,6 +366,37 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "yt_transcript",
+            "description": "Fetch the full transcript of a YouTube video with timestamps. Use when the user provides a YouTube URL or video ID and wants the transcript, summary, or content of the video.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url":             {"type": "string",  "description": "YouTube URL or video ID"},
+                    "with_timestamps": {"type": "boolean", "description": "Include timestamps (default true)", "default": True},
+                    "language":        {"type": "string",  "description": "Language code e.g. 'en', 'es' (default 'en')", "default": "en"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_papers",
+            "description": "Search for academic papers on Semantic Scholar. Returns title, authors, year, abstract, citation count, and links. Use for research queries, scientific topics, or when user asks for papers/studies.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string",  "description": "Search query for academic papers"},
+                    "limit": {"type": "integer", "description": "Number of results (default 5, max 10)", "default": 5},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
