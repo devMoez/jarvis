@@ -86,6 +86,14 @@ from tools.file_organizer import (
     organize_directory as _organize_dir, fmt_organize_result as _organize_fmt,
     undo_organize as _organize_undo, list_manifests as _organize_manifests,
 )
+from tools.image_tools import (
+    analyze_image as _img_analyze,
+    remove_bg as _img_removebg,
+    upscale_image as _img_upscale,
+    generate_image as _img_generate,
+    color_grade as _img_grade,
+    list_grade_styles as _grade_styles,
+)
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -139,6 +147,7 @@ _KNOWN_CMDS = {
     "/speak", "/voices", "/tts",
     "/transcribe", "/listen",
     "/schedule", "/organize",
+    "/imagine", "/imggen", "/removebg", "/upscale", "/imganalyze", "/grade",
 }
 
 
@@ -530,6 +539,16 @@ def cmd_help():
     _cmd_row("/transcribe <f> --lang <code>","Force language (e.g. fr, es, de)",   CYAN)
     _cmd_row("/listen",                "Record from mic and transcribe",             CYAN)
     _cmd_row("/listen --save",         "Record, transcribe, and save file",         CYAN)
+
+    _section("Image Tools", VIOLET)
+    _cmd_row("/imagine <prompt>",           "Generate image (Stability AI or Replicate SDXL)", VIOLET)
+    _cmd_row("/imagine <p> --size WxH",     "Set output dimensions",                           VIOLET)
+    _cmd_row("/imagine <p> --negative <n>", "Add negative prompt",                             VIOLET)
+    _cmd_row("/imganalyze <file> [question]","Analyze/describe an image via AI vision",        VIOLET)
+    _cmd_row("/removebg <file>",            "Remove image background (remove.bg)",             VIOLET)
+    _cmd_row("/upscale <file> [2|4]",       "Upscale image 2x or 4x (Replicate Real-ESRGAN)", VIOLET)
+    _cmd_row("/grade <file> <style>",       "Apply color grade (vintage, vivid, noir, …)",     VIOLET)
+    _cmd_row("/grade styles",               "List available color grade styles",               VIOLET)
 
     _section("Scheduler", AMBER)
     _cmd_row("/schedule list",                   "Show all scheduled tasks",        AMBER)
@@ -1389,6 +1408,164 @@ def cmd_organize(args: list):
     threading.Thread(target=_do, daemon=True).start()
 
 
+# ── /imagine (image generation) ───────────────────────────────────────────────
+def cmd_imagine(args: list, raw_text: str = ""):
+    """
+    /imagine <prompt>
+    /imagine <prompt> --negative <negative_prompt>
+    /imagine <prompt> --size 512x512
+    /imagine <prompt> --steps 50
+    /imagine <prompt> --provider stability|replicate
+    """
+    if not args:
+        _raw(f"  {DIM}Usage: /imagine <prompt> [--negative <neg>] [--size WxH] [--steps N] [--provider stability|replicate]{RESET}\n\n")
+        return
+
+    negative = ""
+    width    = 1024
+    height   = 1024
+    steps    = 30
+    provider = "auto"
+    prompt_parts: list[str] = []
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--negative" and i + 1 < len(args):
+            negative = args[i + 1]; i += 2
+        elif args[i] == "--size" and i + 1 < len(args):
+            try:
+                w, h = args[i + 1].lower().split("x")
+                width, height = int(w), int(h)
+            except Exception:
+                pass
+            i += 2
+        elif args[i] == "--steps" and i + 1 < len(args):
+            try:
+                steps = int(args[i + 1])
+            except Exception:
+                pass
+            i += 2
+        elif args[i] == "--provider" and i + 1 < len(args):
+            provider = args[i + 1].lower(); i += 2
+        else:
+            prompt_parts.append(args[i]); i += 1
+
+    prompt = " ".join(prompt_parts) or raw_text
+    if not prompt.strip():
+        _raw(f"  {CORAL}No prompt given.{RESET}\n"); return
+
+    _raw(f"  {DIM}Generating image: \"{prompt[:60]}{'…' if len(prompt) > 60 else ''}\"...{RESET}\n")
+
+    def _do():
+        ok, result = _img_generate(prompt, negative_prompt=negative,
+                                   width=width, height=height,
+                                   steps=steps, provider=provider)
+        if ok:
+            _raw(f"  {GREEN}✓  Image saved:{RESET}  {DIM}{result}{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Generation failed: {sanitize(result)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+# ── /removebg ────────────────────────────────────────────────────────────────
+def cmd_removebg(args: list):
+    if not args:
+        _raw(f"  {DIM}Usage: /removebg <image-path>{RESET}\n"); return
+    path = " ".join(args)
+    _raw(f"  {DIM}Removing background from {os.path.basename(path)}...{RESET}\n")
+
+    def _do():
+        ok, result = _img_removebg(path)
+        if ok:
+            _raw(f"  {GREEN}✓  Saved:{RESET}  {DIM}{result}{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Failed: {sanitize(result)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+# ── /upscale ─────────────────────────────────────────────────────────────────
+def cmd_upscale(args: list):
+    """
+    /upscale <image-path> [2|4]   (default 4x)
+    """
+    if not args:
+        _raw(f"  {DIM}Usage: /upscale <image-path> [2|4]{RESET}\n"); return
+    scale = 4
+    if len(args) >= 2:
+        try:
+            scale = int(args[-1])
+            path  = " ".join(args[:-1])
+        except ValueError:
+            path = " ".join(args)
+    else:
+        path = args[0]
+
+    _raw(f"  {DIM}Upscaling {os.path.basename(path)} {scale}x...{RESET}\n")
+
+    def _do():
+        ok, result = _img_upscale(path, scale=scale)
+        if ok:
+            _raw(f"  {GREEN}✓  Saved:{RESET}  {DIM}{result}{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Upscale failed: {sanitize(result)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+# ── /imganalyze ───────────────────────────────────────────────────────────────
+def cmd_imganalyze(args: list):
+    """
+    /imganalyze <image-path> [question...]
+    """
+    if not args:
+        _raw(f"  {DIM}Usage: /imganalyze <image-path> [question]{RESET}\n"); return
+
+    path     = args[0]
+    question = " ".join(args[1:]) if len(args) > 1 else ""
+    _raw(f"  {DIM}Analyzing image...{RESET}\n")
+
+    def _do():
+        result = _img_analyze(path, question=question)
+        _raw(f"\n{sanitize(result)}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+# ── /grade ────────────────────────────────────────────────────────────────────
+def cmd_grade(args: list):
+    """
+    /grade <image-path> <style>
+    /grade styles — list available styles
+    """
+    if not args or (len(args) == 1 and args[0].lower() in ("styles", "list")):
+        styles = ", ".join(_grade_styles())
+        _raw(f"  {CYAN}Available styles:{RESET}  {WHITE}{styles}{RESET}\n\n")
+        return
+
+    if len(args) < 2:
+        _raw(f"  {DIM}Usage: /grade <image-path> <style>  e.g. /grade photo.jpg vintage{RESET}\n"); return
+
+    path  = args[0]
+    style = args[1]
+    _raw(f"  {DIM}Applying '{style}' grade to {os.path.basename(path)}...{RESET}\n")
+
+    def _do():
+        ok, result = _img_grade(path, style)
+        if ok:
+            _raw(f"  {GREEN}✓  Saved:{RESET}  {DIM}{result}{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Failed: {sanitize(result)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1515,6 +1692,16 @@ def handle_slash(raw: str) -> bool:
         cmd_schedule(args); return True
     if cmd == "/organize":
         cmd_organize(args); return True
+    if cmd in ("/imagine", "/imggen"):
+        cmd_imagine(args, raw_text=" ".join(args)); return True
+    if cmd == "/removebg":
+        cmd_removebg(args); return True
+    if cmd == "/upscale":
+        cmd_upscale(args); return True
+    if cmd == "/imganalyze":
+        cmd_imganalyze(args); return True
+    if cmd == "/grade":
+        cmd_grade(args); return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
