@@ -42,4 +42,5 @@ desktop.ini
 # IDE & local tools
 .claude/
 data/session.json
+data/task_memory.json
 

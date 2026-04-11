@@ -15,13 +15,15 @@ def is_speaking() -> bool:
 
 
 def speak(text: str) -> None:
-    """Convert text to speech and play it. Blocks until done."""
+    """Convert text to speech and play it. Blocks until done. Silent-fails if audio unavailable."""
     global _is_speaking
     if not text.strip():
         return
     _is_speaking = True
     try:
         asyncio.run(_speak_async(text))
+    except Exception:
+        pass   # audio device unavailable or TTS error — skip silently
     finally:
         _is_speaking = False
 
@@ -34,10 +36,16 @@ async def _speak_async(text: str) -> None:
     try:
         await communicate.save(tmp_path)
         data, samplerate = sf.read(tmp_path)
-        sd.play(data, samplerate)
-        sd.wait()
+        try:
+            sd.play(data, samplerate)
+            sd.wait()
+        except Exception:
+            pass   # PortAudio / MME device error — skip playback silently
     finally:
-        os.unlink(tmp_path)
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
 
 
 def speak_async_nonblocking(text: str) -> None:

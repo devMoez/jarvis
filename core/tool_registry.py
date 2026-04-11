@@ -256,6 +256,102 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_open_visible",
+            "description": (
+                "Open a URL in a VISIBLE Chrome window so the user can see and interact with it. "
+                "Use for browsing, watching, or any task where the user wants to see the browser."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to open"},
+                    "wait_seconds": {"type": "integer", "description": "Seconds to keep window open (default 60)", "default": 60},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_login",
+            "description": (
+                "Open a URL in a visible Chrome window for the user to sign in / log in manually. "
+                "Saves the login session (cookies) so future visits skip the login step. "
+                "ALWAYS use this — never open_url — when the task involves signing in, logging in, "
+                "or accessing a service that requires authentication (Google, Gmail, YouTube, etc.)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url":          {"type": "string", "description": "Login page URL"},
+                    "service":      {"type": "string", "description": "Service name for session storage e.g. 'google', 'github'"},
+                    "wait_seconds": {"type": "integer", "description": "Seconds to keep window open for login (default 120)", "default": 120},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_with_session",
+            "description": (
+                "Open a URL using a previously saved login session. "
+                "Use this when the user has logged in before and you want to open the page already authenticated. "
+                "If no session exists, automatically opens for login first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url":     {"type": "string", "description": "URL to open"},
+                    "service": {"type": "string", "description": "Service name matching a saved session e.g. 'google'"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deep_research",
+            "description": (
+                "Research a topic in depth by finding top sources via Tavily and scraping their full content. "
+                "Use this when the user asks to 'research', 'deep dive', 'investigate', or 'write a report' on a topic. "
+                "Returns all scraped content for synthesis into a complete report."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic":       {"type": "string",  "description": "The topic or question to research"},
+                    "max_sources": {"type": "integer", "description": "Number of sources to scrape (default 5)", "default": 5},
+                },
+                "required": ["topic"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_book",
+            "description": (
+                "Search for a book, PDF, or ebook by title or author on Library Genesis (with Anna's Archive fallback). "
+                "Returns download links and optionally auto-downloads to ./downloads/. "
+                "Use this when the user asks to find, download, or get a book."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query":         {"type": "string",  "description": "Book title, author, or ISBN"},
+                    "auto_download": {"type": "boolean", "description": "Auto-download the first result (default true)", "default": True},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
