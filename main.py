@@ -2,7 +2,7 @@
 Jarvis AI — Main Entry Point
 Default: text mode.  Voice input: /voice.  Help: /help
 """
-import os, sys, threading, time, io
+import os, sys, threading, time, io, json
 
 # ── UTF-8 + silence warnings ─────────────────────────────────────────────────
 if sys.platform == "win32":
@@ -96,6 +96,12 @@ from tools.image_tools import (
 )
 from tools.video_gen import text_to_video as _vid_text, image_to_video as _vid_image
 from tools.ai_detection import detect_image as _det_image, detect_text as _det_text, fmt_detection_result as _det_fmt
+from tools.n8n_bridge import (
+    trigger_workflow as _n8n_trigger, add_shortcut as _n8n_add,
+    remove_shortcut as _n8n_remove, list_shortcuts as _n8n_list,
+    n8n_ping as _n8n_ping, n8n_api_list_workflows as _n8n_workflows,
+    parse_kv_args as _n8n_parse_kv,
+)
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -152,6 +158,7 @@ _KNOWN_CMDS = {
     "/imagine", "/imggen", "/removebg", "/upscale", "/imganalyze", "/grade",
     "/vidgen", "/animate",
     "/aidetect", "/isai",
+    "/n8n",
 }
 
 
@@ -543,6 +550,14 @@ def cmd_help():
     _cmd_row("/transcribe <f> --lang <code>","Force language (e.g. fr, es, de)",   CYAN)
     _cmd_row("/listen",                "Record from mic and transcribe",             CYAN)
     _cmd_row("/listen --save",         "Record, transcribe, and save file",         CYAN)
+
+    _section("n8n Automation", TEAL)
+    _cmd_row("/n8n trigger <name|url> [k=v]", "Trigger an n8n workflow via webhook", TEAL)
+    _cmd_row("/n8n add <name> <url>",          "Save a webhook shortcut",            TEAL)
+    _cmd_row("/n8n list",                      "List saved workflow shortcuts",       TEAL)
+    _cmd_row("/n8n remove <name>",             "Remove a shortcut",                  TEAL)
+    _cmd_row("/n8n status",                    "Ping n8n instance",                  TEAL)
+    _cmd_row("/n8n workflows",                 "List all workflows via n8n REST API", TEAL)
 
     _section("AI Detection", GREEN)
     _cmd_row("/aidetect <image-path>",      "Detect if an image is AI-generated",          GREEN)
@@ -1725,6 +1740,119 @@ def cmd_aidetect(args: list, raw_text: str = ""):
     threading.Thread(target=_do_img, daemon=True).start()
 
 
+# ── /n8n ──────────────────────────────────────────────────────────────────────
+def cmd_n8n(args: list):
+    """
+    /n8n trigger <name-or-url> [key=value ...]
+    /n8n list
+    /n8n add <name> <webhook-url>
+    /n8n remove <name>
+    /n8n status
+    /n8n workflows   — list workflows via n8n REST API
+    """
+    if not args or args[0] in ("help", ""):
+        _raw(
+            f"\n  {BOLD}{CYAN}n8n Workflow Bridge{RESET}\n\n"
+            f"  {DIM}/n8n trigger <name|url> [key=val ...]  — trigger a workflow\n"
+            f"  /n8n list                               — list saved shortcuts\n"
+            f"  /n8n add <name> <webhook-url>           — save a shortcut\n"
+            f"  /n8n remove <name>                      — remove a shortcut\n"
+            f"  /n8n status                             — ping n8n instance\n"
+            f"  /n8n workflows                          — list all n8n workflows (API){RESET}\n\n"
+            f"  {DIM}Set N8N_WEBHOOK_URL and optionally N8N_API_KEY + N8N_BASE_URL in .env{RESET}\n\n"
+        )
+        return
+
+    sub = args[0].lower()
+
+    if sub == "list":
+        shortcuts = _n8n_list()
+        if not shortcuts:
+            _raw(f"  {DIM}No shortcuts saved yet.  Use /n8n add <name> <url>{RESET}\n\n")
+        else:
+            _raw(f"\n  {CYAN}Saved n8n Shortcuts:{RESET}\n")
+            for name, info in shortcuts.items():
+                _raw(f"  {AMBER}{name}{RESET}  →  {DIM}{info['url']}{RESET}\n")
+            _raw("\n")
+        return
+
+    if sub == "add" and len(args) >= 3:
+        name = args[1]
+        url  = args[2]
+        _n8n_add(name, url)
+        _raw(f"  {GREEN}✓  Shortcut '{name}' saved.{RESET}\n\n")
+        return
+
+    if sub == "remove" and len(args) >= 2:
+        ok = _n8n_remove(args[1])
+        if ok:
+            _raw(f"  {GREEN}✓  Shortcut '{args[1]}' removed.{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}No shortcut named '{args[1]}'.{RESET}\n\n")
+        return
+
+    if sub == "status":
+        _raw(f"  {DIM}Pinging n8n...{RESET}\n")
+        def _do_ping():
+            result = _n8n_ping()
+            if result["success"]:
+                _raw(f"  {GREEN}✓  n8n online{RESET}  {DIM}{result.get('base_url','')}{RESET}\n\n")
+            else:
+                _raw(f"  {CORAL}n8n unreachable: {result.get('error','')}{RESET}\n\n")
+            _render(force=True)
+        threading.Thread(target=_do_ping, daemon=True).start()
+        return
+
+    if sub == "workflows":
+        _raw(f"  {DIM}Fetching workflows from n8n API...{RESET}\n")
+        def _do_wf():
+            result = _n8n_workflows()
+            if result["success"]:
+                wfs = result.get("workflows", [])
+                _raw(f"\n  {CYAN}n8n Workflows ({len(wfs)}):{RESET}\n")
+                for wf in wfs:
+                    active = f"{GREEN}●{RESET}" if wf.get("active") else f"{DIM}○{RESET}"
+                    _raw(f"  {active} [{wf.get('id','')}]  {WHITE}{wf.get('name','')}{RESET}\n")
+                _raw("\n")
+            else:
+                _raw(f"  {CORAL}Failed: {result.get('error','')}{RESET}\n\n")
+            _render(force=True)
+        threading.Thread(target=_do_wf, daemon=True).start()
+        return
+
+    if sub == "trigger" and len(args) >= 2:
+        target  = args[1]
+        payload = _n8n_parse_kv(args[2:])
+        _raw(f"  {DIM}Triggering workflow '{target}'...{RESET}\n")
+        def _do_trig():
+            result = _n8n_trigger(target, payload=payload)
+            if result["success"]:
+                resp = result.get("response", "")
+                resp_str = json.dumps(resp, indent=2) if isinstance(resp, dict) else str(resp)
+                _raw(f"  {GREEN}✓  Workflow triggered  (HTTP {result['status']}){RESET}\n")
+                if resp_str and resp_str.strip() not in ("{}", ""):
+                    _raw(f"  {DIM}{sanitize(resp_str[:500])}{RESET}\n")
+                _raw("\n")
+            else:
+                _raw(f"  {CORAL}Trigger failed: {result.get('error','')}{RESET}\n\n")
+            _render(force=True)
+        threading.Thread(target=_do_trig, daemon=True).start()
+        return
+
+    # Default: treat whole args as a trigger shortcut name
+    target  = args[0]
+    payload = _n8n_parse_kv(args[1:])
+    _raw(f"  {DIM}Triggering '{target}'...{RESET}\n")
+    def _do_default():
+        result = _n8n_trigger(target, payload=payload)
+        if result["success"]:
+            _raw(f"  {GREEN}✓  Done  (HTTP {result['status']}){RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Failed: {result.get('error','')}{RESET}\n\n")
+        _render(force=True)
+    threading.Thread(target=_do_default, daemon=True).start()
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1867,6 +1995,8 @@ def handle_slash(raw: str) -> bool:
         cmd_animate(args); return True
     if cmd in ("/aidetect", "/isai"):
         cmd_aidetect(args, raw_text=" ".join(args)); return True
+    if cmd == "/n8n":
+        cmd_n8n(args); return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
