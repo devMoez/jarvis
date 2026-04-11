@@ -94,6 +94,7 @@ from tools.image_tools import (
     color_grade as _img_grade,
     list_grade_styles as _grade_styles,
 )
+from tools.video_gen import text_to_video as _vid_text, image_to_video as _vid_image
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -148,6 +149,7 @@ _KNOWN_CMDS = {
     "/transcribe", "/listen",
     "/schedule", "/organize",
     "/imagine", "/imggen", "/removebg", "/upscale", "/imganalyze", "/grade",
+    "/vidgen", "/animate",
 }
 
 
@@ -539,6 +541,13 @@ def cmd_help():
     _cmd_row("/transcribe <f> --lang <code>","Force language (e.g. fr, es, de)",   CYAN)
     _cmd_row("/listen",                "Record from mic and transcribe",             CYAN)
     _cmd_row("/listen --save",         "Record, transcribe, and save file",         CYAN)
+
+    _section("Video Generation", CORAL)
+    _cmd_row("/vidgen <prompt>",              "Text-to-video (Runway Gen-3 or Replicate)",  CORAL)
+    _cmd_row("/vidgen <p> --duration 4",      "Set clip duration in seconds",               CORAL)
+    _cmd_row("/vidgen <p> --provider runway", "Force provider: runway or replicate",        CORAL)
+    _cmd_row("/animate <image> [prompt]",     "Animate an image into a video",              CORAL)
+    _cmd_row("/animate <img> --provider stability", "Force Stability AI SVD",              CORAL)
 
     _section("Image Tools", VIOLET)
     _cmd_row("/imagine <prompt>",           "Generate image (Stability AI or Replicate SDXL)", VIOLET)
@@ -1566,6 +1575,94 @@ def cmd_grade(args: list):
     threading.Thread(target=_do, daemon=True).start()
 
 
+# ── /vidgen ───────────────────────────────────────────────────────────────────
+def cmd_vidgen(args: list):
+    """
+    /vidgen <prompt>                         — text-to-video
+    /vidgen <prompt> --duration 4            — 4 or 8 seconds
+    /vidgen <prompt> --provider runway|replicate
+    /animate <image-path> [prompt] [--duration 4] [--provider runway|stability]
+    """
+    if not args:
+        _raw(
+            f"\n  {BOLD}Usage:{RESET}\n"
+            f"  {DIM}/vidgen <prompt> [--duration 4] [--provider runway|replicate]\n"
+            f"  /animate <image-path> [prompt] [--duration 4] [--provider runway|stability]{RESET}\n\n"
+        )
+        return
+
+    duration = 4
+    provider = "auto"
+    prompt_parts: list[str] = []
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--duration" and i + 1 < len(args):
+            try:
+                duration = int(args[i + 1])
+            except Exception:
+                pass
+            i += 2
+        elif args[i] == "--provider" and i + 1 < len(args):
+            provider = args[i + 1].lower(); i += 2
+        else:
+            prompt_parts.append(args[i]); i += 1
+
+    prompt = " ".join(prompt_parts)
+    if not prompt.strip():
+        _raw(f"  {CORAL}No prompt given.{RESET}\n"); return
+
+    _raw(f"  {DIM}Generating video: \"{prompt[:60]}{'…' if len(prompt) > 60 else ''}\" ({duration}s)...{RESET}\n")
+
+    def _do():
+        ok, result = _vid_text(prompt, duration=duration, provider=provider)
+        if ok:
+            _raw(f"  {GREEN}✓  Video saved:{RESET}  {DIM}{result}{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Video generation failed: {sanitize(result)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def cmd_animate(args: list):
+    """Animate an image into a short video."""
+    if not args:
+        _raw(f"  {DIM}Usage: /animate <image-path> [prompt] [--duration 4] [--provider runway|stability]{RESET}\n\n")
+        return
+
+    duration    = 4
+    provider    = "auto"
+    image_path  = args[0]
+    prompt_parts: list[str] = []
+
+    i = 1
+    while i < len(args):
+        if args[i] == "--duration" and i + 1 < len(args):
+            try:
+                duration = int(args[i + 1])
+            except Exception:
+                pass
+            i += 2
+        elif args[i] == "--provider" and i + 1 < len(args):
+            provider = args[i + 1].lower(); i += 2
+        else:
+            prompt_parts.append(args[i]); i += 1
+
+    prompt = " ".join(prompt_parts)
+    _raw(f"  {DIM}Animating {os.path.basename(image_path)} ({duration}s)...{RESET}\n")
+
+    def _do():
+        ok, result = _vid_image(image_path, prompt=prompt, duration=duration, provider=provider)
+        if ok:
+            _raw(f"  {GREEN}✓  Video saved:{RESET}  {DIM}{result}{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Animation failed: {sanitize(result)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1702,6 +1799,10 @@ def handle_slash(raw: str) -> bool:
         cmd_imganalyze(args); return True
     if cmd == "/grade":
         cmd_grade(args); return True
+    if cmd == "/vidgen":
+        cmd_vidgen(args); return True
+    if cmd == "/animate":
+        cmd_animate(args); return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
