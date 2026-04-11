@@ -73,13 +73,24 @@ class Orchestrator:
                         tools=tools,
                         tool_choice="auto",
                         temperature=0.7,
-                        max_tokens=2048,
+                        max_tokens=900,
                         stream=True,
                         stream_options={"include_usage": True},
                     )
                 except Exception as e:
                     last_err = f"{type(e).__name__}: {e}"
                     log_error("orchestrator", last_err)
+                    # 402 = insufficient credits — give a clear message immediately
+                    err_str = str(e)
+                    if "402" in err_str and "credits" in err_str.lower():
+                        msg = (
+                            "⚠  OpenRouter credit balance too low.\n"
+                            "   Top up at: https://openrouter.ai/settings/credits\n"
+                            "   Or switch to a free model: /add-api openrouter <new-key>"
+                        )
+                        yield msg
+                        self.history.add_assistant(msg)
+                        return
                     if not self._api.try_next():
                         msg = f"API error — {last_err}"
                         yield msg
