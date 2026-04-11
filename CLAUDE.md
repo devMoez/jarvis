@@ -13,7 +13,7 @@ Iron Man–inspired CLI. Text + voice input. Streaming LLM responses via Gemini 
 
 - **Entry point:** `main.py` — run with `venv/Scripts/python.exe main.py`
 - **Voice mode:** `venv/Scripts/python.exe main.py --voice`
-- **Current version:** 3.0.0 (defined in `version.py` and `pyproject.toml`)
+- **Current version:** 2.0.0 (defined in `version.py` and `pyproject.toml`)
 - **Platform:** Windows 11 only (Windows-specific paths, subprocess calls, power commands)
 - **Python:** 3.14 (venv at `./venv/`)
 

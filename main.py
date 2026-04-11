@@ -13,6 +13,9 @@ if sys.platform == "win32":
 import warnings; warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")   # suppress unauthenticated HF warnings
+os.environ.setdefault("HUGGINGFACE_HUB_VERBOSITY", "error")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 import logging
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
@@ -330,6 +333,24 @@ _RENDER_INTERVAL = 0.033        # ~30 fps cap
 def sanitize(t: str) -> str:
     return t.encode("utf-8", errors="replace").decode("utf-8")
 
+# ── Win32 cursor visibility (bypasses ANSI — works even if VT100 is off) ─────
+def _set_cursor_visible(visible: bool) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes, ctypes.wintypes
+        import ctypes.wintypes as _wt
+        class _CURSOR_INFO(ctypes.Structure):
+            _fields_ = [("dwSize", ctypes.c_int), ("bVisible", ctypes.c_int)]
+        k32 = ctypes.windll.kernel32
+        h   = k32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        ci  = _CURSOR_INFO()
+        if k32.GetConsoleCursorInfo(h, ctypes.byref(ci)):
+            ci.bVisible = 1 if visible else 0
+            k32.SetConsoleCursorInfo(h, ctypes.byref(ci))
+    except Exception:
+        pass
+
 def cls():
     os.system("cls" if os.name == "nt" else "clear")
 
@@ -373,7 +394,8 @@ def _do_render() -> None:
     start_i = max(0, end_i - output_h)
     visible = lines[start_i:end_i]
 
-    buf: list = ["\033[?25l"]   # hide cursor during redraw (VT100 enabled inside fullscreen)
+    _set_cursor_visible(False)   # hide cursor via Win32 API (avoids ←[?25l appearing as text)
+    buf: list = []
 
     # ── Output zone ───────────────────────────────────────────────────────
     for i in range(output_h):
@@ -420,12 +442,13 @@ def _do_render() -> None:
     )
     buf.append(f"\033[{h};1H\033[K{sb}")
 
-    # ── Reposition cursor inside the input bar, then restore visibility ──
+    # ── Reposition cursor inside the input bar ────────────────────────────
     cur_col = min(7 + _inp_pos[0] + 1, w)  # " You › " = 7 visible chars; 1-based
-    buf.append(f"\033[{h-2};{cur_col}H\033[?25h")
+    buf.append(f"\033[{h-2};{cur_col}H")
 
     sys.stdout.write(''.join(buf))
     sys.stdout.flush()
+    _set_cursor_visible(True)    # restore cursor via Win32 API after draw is done
 
 def _render(force: bool = False) -> None:
     """Thread-safe render — throttled to _RENDER_INTERVAL; no-op before fullscreen."""
