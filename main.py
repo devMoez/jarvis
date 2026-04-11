@@ -17,8 +17,8 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 import logging
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
-
-sys.stderr = io.TextIOWrapper(open(os.devnull, "wb"), encoding="utf-8")
+logging.getLogger("chromadb").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
 
 import colorama
 # convert=True  → colorama intercepts ANSI codes and calls Win32 console API (works in ALL terminals)
@@ -35,12 +35,6 @@ from rich.panel import Panel
 from rich.text import Text
 from rich import box
 from rich.rule import Rule
-
-from prompt_toolkit import PromptSession
-from prompt_toolkit.patch_stdout import patch_stdout as _patch_stdout
-from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.lexers import Lexer as _PTLexer
-from prompt_toolkit.styles import Style as _PTStyle
 
 from version import VERSION, API_PROVIDER, AUTHOR
 
@@ -72,6 +66,12 @@ from core.conversation import (
 from tools.search import search_web
 from tools.research import deep_research
 from tools.books import find_book
+from tools.wiki import wiki_search
+from tools.clipboard_mgr import start_tracking as _clip_start, get_history as _clip_history, paste_item as _clip_paste, clear_history as _clip_clear
+from tools.todo import add_todo, list_todos, done_todo, remove_todo, clear_done as clear_done_todos
+from tools.timer import start_timer as _start_timer
+from core.stats import get_today as _stats_today, get_all as _stats_all
+from core.error_log import log_error
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -117,42 +117,12 @@ _KNOWN_CMDS = {
     "/memory", "/mem", "/learn", "/patterns", "/skill", "/skills",
     "/cmd", "/commands_custom", "/profile",
     "/add-api", "/list-apis",
-    "/first",
+    "/first", "/cancel",
     "/search", "/research", "/book",
+    "/wiki", "/stats", "/clips", "/clip",
+    "/todo", "/timer", "/remind",
 }
 
-class _CmdLexer(_PTLexer):
-    """Color /commands as you type: valid=cyan, partial=teal, unknown=gray."""
-    def lex_document(self, document):
-        text = document.text
-        def get_line(lineno):
-            if not text.startswith("/"):
-                return [("", text)]
-            parts = text.split()
-            cmd  = parts[0].lower() if parts else text.lower()
-            if cmd in _KNOWN_CMDS:
-                return [("class:cmd-valid", text)]
-            if any(k.startswith(cmd) for k in _KNOWN_CMDS):
-                return [("class:cmd-partial", text)]
-            return [("class:cmd-unknown", text)]
-        return get_line
-
-_PROMPT_STYLE = _PTStyle.from_dict({
-    "pt-label":   "bold #57d7ff",   # You  — bright cyan bold
-    "pt-arrow":   "#57d7ff",        # ›
-    "pt-mode":    "bold #5fd787",   # [mode] tag
-    "pt-queue":   "bold #ff8c69",   # [Q:n] tag
-    "cmd-valid":  "bold #5fd7ff",   # known command — cyan bold
-    "cmd-partial":"#5faf87",        # still typing — teal
-    "cmd-unknown":"#808080",        # unrecognised — dim gray
-    # bottom toolbar
-    "toolbar":         "bg:#0d0d1a #57d7ff",
-    "toolbar.mode":    "bg:#0d0d1a bold #5fd787",
-    "toolbar.busy":    "bg:#0d0d1a bold #ffd700",
-    "toolbar.queue":   "bg:#0d0d1a bold #ff8c69",
-    "toolbar.hint":    "bg:#0d0d1a #404040",
-    "toolbar.model":   "bg:#0d0d1a #505088",
-})
 
 # ── Tool label map ────────────────────────────────────────────────────────────
 TOOL_LABELS = {
@@ -178,6 +148,7 @@ TOOL_LABELS = {
     "browser_with_session":("SESSION",  "cyan"),
     "deep_research":       ("RESEARCH", "magenta"),
     "find_book":           ("BOOKS",    "green"),
+    "wiki_search":         ("WIKI",     "cyan"),
 }
 
 TOOL_ANSI = {
@@ -203,6 +174,7 @@ TOOL_ANSI = {
     "browser_with_session":CYAN,
     "deep_research":       VIOLET,
     "find_book":           GREEN,
+    "wiki_search":         CYAN,
 }
 
 # Plain-text status labels shown in spinner (no ANSI — spinner colors them)
@@ -229,6 +201,7 @@ TOOL_STATUS = {
     "browser_with_session":"opening with session...",
     "deep_research":       "researching topic...",
     "find_book":           "searching LibGen...",
+    "wiki_search":         "searching Wikipedia...",
 }
 
 # Colors cycled by the spinner for status labels
@@ -259,6 +232,10 @@ registry.register("browser_login",        browser_login)
 registry.register("browser_with_session", browser_with_session)
 registry.register("deep_research",        deep_research)
 registry.register("find_book",            find_book)
+registry.register("wiki_search",          wiki_search)
+
+# Start clipboard background tracker
+_clip_start()
 
 orchestrator = Orchestrator(tool_registry=registry)
 
@@ -270,6 +247,24 @@ _mode         = "text"
 _abort_event  = threading.Event()   # set to cancel the current AI task (Ctrl+Q)
 _worker_busy  = threading.Event()   # set while worker thread is processing
 
+# ── Blessed UI state ──────────────────────────────────────────────────────────
+import blessed as _blessed_mod
+import re     as _re_mod
+_term      = _blessed_mod.Terminal()
+_out_buf  : list  = []          # permanent output lines (strings with ANSI)
+_out_acc  : list  = [""]        # partial-line accumulator for _raw()
+_stream   : list  = [""]        # live streaming text (shown while AI is typing)
+_scroll   : list  = [0]         # scroll offset — 0 = pinned to bottom
+_inp_buf  : list  = []          # current input characters
+_inp_pos  : list  = [0]         # cursor position inside _inp_buf
+_spin_lbl : list  = [""]        # spinner text shown in the status bar
+_ui_active: list  = [False]     # True only after t.fullscreen() is entered
+_out_lock  = threading.Lock()   # guards _out_buf / _out_acc
+_rndr_lock = threading.Lock()   # serialises terminal writes
+_ANSI_ESC  = _re_mod.compile(r'\x1b\[[0-9;]*[mABCDEFGHJKLMSTfnsuhlr]')
+_last_render_t: list = [0.0]    # throttle: last render timestamp
+_RENDER_INTERVAL = 0.033        # ~30 fps cap
+
 # ── Raw stdout helpers ────────────────────────────────────────────────────────
 def sanitize(t: str) -> str:
     return t.encode("utf-8", errors="replace").decode("utf-8")
@@ -277,19 +272,113 @@ def sanitize(t: str) -> str:
 def cls():
     os.system("cls" if os.name == "nt" else "clear")
 
-if sys.platform == "win32":
-    from colorama.ansitowin32 import AnsiToWin32 as _AnsiToWin32
-    def _raw(text: str, end: str = "") -> None:
-        _AnsiToWin32(sys.stdout, convert=True, strip=False).write(text + end)
-        sys.stdout.flush()
-else:
-    def _raw(text: str, end: str = "") -> None:
-        sys.stdout.write(text + end)
-        sys.stdout.flush()
+def _raw(text: str, end: str = "") -> None:
+    """Buffer output into the blessed output area (never writes stdout directly)."""
+    full = text + end
+    chunks = full.split('\n')
+    with _out_lock:
+        _out_acc[0] += chunks[0]
+        for chunk in chunks[1:]:
+            _out_buf.append(_out_acc[0])
+            _out_acc[0] = chunk
+    _render()
 
 def _clear_line() -> None:
-    sys.stdout.write("\r" + " " * 70 + "\r")
+    pass  # spinner clearing is handled by _render()
+
+def _do_render() -> None:
+    """Full terminal redraw: output area + gold divider + status bar + input bar."""
+    try:
+        w = max(_term.width  or 80, 40)
+        h = max(_term.height or 24, 8)
+    except Exception:
+        return
+    output_h = h - 4          # rows 1 .. h-4 for scrollable output
+
+    # Collect all content lines
+    with _out_lock:
+        lines = list(_out_buf)
+        if _out_acc[0]:
+            lines.append(_out_acc[0])
+
+    stream = _stream[0]
+    if stream:
+        for ln in stream.split('\n'):
+            lines.append(ln)
+
+    total   = len(lines)
+    offset  = _scroll[0]
+    end_i   = total - offset
+    start_i = max(0, end_i - output_h)
+    visible = lines[start_i:end_i]
+
+    buf: list = ["\033[?25l"]   # hide cursor during redraw (VT100 enabled inside fullscreen)
+
+    # ── Output zone ───────────────────────────────────────────────────────
+    for i in range(output_h):
+        buf.append(f"\033[{i+1};1H\033[K")
+        if i < len(visible):
+            ln   = visible[i]
+            vlen = len(_ANSI_ESC.sub('', ln))
+            buf.append(ln if vlen <= w else _ANSI_ESC.sub('', ln)[:w])
+
+    # Scroll hint (top row, reverse video)
+    if offset > 0:
+        hint = f" ↑ {offset} lines above — End: jump to bottom "[:w]
+        buf.append(f"\033[1;1H\033[7m{hint}\033[m")
+
+    # ── Gold divider ──────────────────────────────────────────────────────
+    buf.append(f"\033[{h-3};1H\033[K\033[33m{'─' * w}\033[m")
+
+    # ── Input bar ─────────────────────────────────────────────────────────
+    inp_str  = ''.join(_inp_buf)
+    inp_disp = f" \033[1mYou\033[m\033[2m › \033[m\033[97m{inp_str}\033[m"
+    buf.append(f"\033[{h-2};1H\033[K{inp_disp}")
+
+    # ── Bottom gold border ────────────────────────────────────────────────
+    buf.append(f"\033[{h-1};1H\033[K\033[33m{'─' * w}\033[m")
+
+    # ── Status bar (below input border) ───────────────────────────────────
+    mode_str = _get_mode() or "normal"
+    try:
+        qsize = msg_queue.size()
+    except Exception:
+        qsize = 0
+    spin = _spin_lbl[0]
+    try:
+        mdl = orchestrator._api.current_model.split('/')[-1]
+    except Exception:
+        mdl = ""
+    sb = (
+        f" \033[1;33m⚡ Jarvis\033[m  "
+        f"\033[96m[{mode_str}]\033[m  "
+        f"\033[97m[Q:{qsize}]\033[m"
+        + (f"  \033[2m{spin}\033[m" if spin else "")
+        + (f"  \033[2m{mdl}\033[m" if mdl else "")
+        + f"  \033[2mCtrl+Q: cancel\033[m"
+    )
+    buf.append(f"\033[{h};1H\033[K{sb}")
+
+    # ── Reposition cursor inside the input bar, then restore visibility ──
+    cur_col = min(7 + _inp_pos[0] + 1, w)  # " You › " = 7 visible chars; 1-based
+    buf.append(f"\033[{h-2};{cur_col}H\033[?25h")
+
+    sys.stdout.write(''.join(buf))
     sys.stdout.flush()
+
+def _render(force: bool = False) -> None:
+    """Thread-safe render — throttled to _RENDER_INTERVAL; no-op before fullscreen."""
+    if not _ui_active[0]:
+        return
+    now = time.monotonic()
+    if not force and (now - _last_render_t[0]) < _RENDER_INTERVAL:
+        return
+    if _rndr_lock.acquire(blocking=False):
+        try:
+            _last_render_t[0] = time.monotonic()
+            _do_render()
+        finally:
+            _rndr_lock.release()
 
 # ── ASCII art logo ────────────────────────────────────────────────────────────
 JARVIS_LOGO = [
@@ -311,13 +400,6 @@ def print_banner():
     _raw(f"  {GOLD}{BOLD}v{CYAN}{VERSION}{RESET}\n")
     _raw(f"  {GOLD}{BOLD}Powered By {CYAN}OpenRouter{GOLD}  |  Built by {CYAN}Moez{RESET}\n")
     _raw(f"\n  {BAR}\n\n")
-
-# ── Styled input with borders ─────────────────────────────────────────────────
-def _read_input() -> str:
-    _raw(f"\n  {CYAN}{BOLD}You{RESET}  {WHITE}")
-    result = input()
-    _raw(RESET)
-    return result
 
 # ── Section header helper ─────────────────────────────────────────────────────
 def _section(title: str, color: str) -> None:
@@ -404,6 +486,8 @@ def cmd_help():
 
     _section("Keyboard Shortcuts", CYAN)
     _cmd_row("Ctrl+Q",               "Cancel running task  /  quit (if idle)",    CYAN)
+    _cmd_row("/cancel",              "Cancel current task (keeps queue)",          CYAN)
+    _cmd_row("/cancel --all",        "Cancel task + clear entire queue",           CYAN)
 
     _raw(f"\n  {GOLD}{'─' * 50}{RESET}\n")
     _raw(f"  {DIM}Just talk naturally — Jarvis understands plain English.{RESET}\n\n")
@@ -642,22 +726,16 @@ def _classify_task(text: str) -> str:
 
 # ── Spinner (cycling colors) ──────────────────────────────────────────────────
 def _spinner_thread(stop_event: threading.Event, status_ref: list) -> None:
+    """Animate the status bar spinner — never writes to stdout directly."""
     frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     i = 0
-    color_i = 0
-    tick = 0
-    _raw("\n")   # push below the You line so \r doesn't overwrite it
     while not stop_event.is_set():
-        color = _STATUS_COLORS[color_i % len(_STATUS_COLORS)]
-        label = status_ref[0]
-        _raw(f"\r  {color}{frames[i % len(frames)]}{RESET}  {color}{label}{RESET}   ")
+        _spin_lbl[0] = f"{frames[i % len(frames)]}  {status_ref[0]}"
+        _render()
         i += 1
-        tick += 1
-        if tick >= _COLOR_CHANGE_TICKS:
-            color_i += 1
-            tick = 0
         time.sleep(0.08)
-    _clear_line()
+    _spin_lbl[0] = ""
+    _render()
 
 # ── Streaming response ────────────────────────────────────────────────────────
 def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") -> str:
@@ -677,43 +755,6 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
         target=_spinner_thread, args=(stop_spin, status_ref), daemon=True
     )
     spin_thread.start()
-
-    # ── Word-wrap state ───────────────────────────────────────────────────────
-    _WRAP       = 78
-    _CONT       = "  "           # 2-space indent, matches standard UI left edge
-    _col        = [2]
-    _wbuf       = [""]
-
-    def _out(ch: str) -> None:
-        if ch == "\n":
-            if _wbuf[0]:
-                _raw(_wbuf[0])
-                _col[0] += len(_wbuf[0])
-                _wbuf[0] = ""
-            _raw("\n" + _CONT)
-            _col[0] = len(_CONT)
-        elif ch == " ":
-            candidate = _wbuf[0] + " "
-            if _col[0] + len(candidate) > _WRAP:
-                _raw("\n" + _CONT)
-                _col[0] = len(_CONT)
-                _raw(_wbuf[0])
-                _col[0] += len(_wbuf[0])
-                _wbuf[0] = ""
-                # drop the space that triggered the wrap
-            else:
-                _raw(candidate)
-                _col[0] += len(candidate)
-                _wbuf[0] = ""
-        else:
-            _wbuf[0] += ch
-
-    def _flush_wbuf() -> None:
-        if _wbuf[0]:
-            if _col[0] + len(_wbuf[0]) > _WRAP:
-                _raw("\n" + _CONT)
-            _raw(_wbuf[0])
-            _wbuf[0] = ""
 
     mem_done.wait(timeout=3)
     gen = orchestrator.process_stream(
@@ -735,23 +776,28 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
         if not header_printed:
             stop_spin.set()
             spin_thread.join()
-            _clear_line()
-            _raw("  ")
+            _stream[0] = ""
             header_printed = True
 
-        for ch in sanitize(token):
-            _out(ch)
         full += token
+        _stream[0] = full
+        _render()
 
     if not stop_spin.is_set():
         stop_spin.set()
         spin_thread.join()
-        _clear_line()
 
-    if header_printed:
-        _flush_wbuf()
-        _raw("\n\n")
+    # Move streaming text to permanent output, clear the live buffer
+    if header_printed and full:
+        with _out_lock:
+            for ln in full.split('\n'):
+                _out_buf.append(ln)
+            _out_buf.append("")          # blank spacer after response
+        _stream[0] = ""
+    else:
+        _stream[0] = ""
 
+    _render(force=True)
     return full
 
 # ── /add-api ──────────────────────────────────────────────────────────────────
@@ -854,6 +900,118 @@ def cmd_mode(args: list[str]) -> None:
         _raw(f"  {DIM}Create one: /mode save {sub} \"your system prompt\"{RESET}\n\n")
 
 
+# ── /stats ───────────────────────────────────────────────────────────────────
+def cmd_stats():
+    s = _stats_today()
+    all_data = _stats_all()
+    all_tokens = sum(
+        v.get("prompt", 0) + v.get("completion", 0)
+        for v in all_data.get("tokens", {}).values()
+    )
+    _raw(f"\n  {AMBER}{BOLD}Usage Stats{RESET}\n")
+    _raw(f"  {GOLD}{'─' * 40}{RESET}\n")
+    _raw(f"  {WHITE}Today ({s['date']}){RESET}\n")
+    _raw(f"    Requests   {CYAN}{s['requests']}{RESET}\n")
+    _raw(f"    Prompt     {CYAN}{s['prompt']:,}{RESET} tokens\n")
+    _raw(f"    Completion {CYAN}{s['completion']:,}{RESET} tokens\n")
+    _raw(f"    Total      {AMBER}{s['total']:,}{RESET} tokens\n")
+    _raw(f"\n  {DIM}All-time: {all_tokens:,} tokens{RESET}\n\n")
+
+
+# ── /clips ────────────────────────────────────────────────────────────────────
+def cmd_clips(args: list):
+    if args and args[0] == "clear":
+        n = _clip_clear()
+        _raw(f"  {DIM}Cleared {n} clipboard entries.{RESET}\n\n")
+        return
+    history = _clip_history()
+    if not history:
+        _raw(f"  {DIM}Clipboard history empty.{RESET}\n\n")
+        return
+    _raw(f"\n  {CYAN}{BOLD}Clipboard History  ({len(history)}){RESET}\n")
+    _raw(f"  {GOLD}{'─' * 40}{RESET}\n")
+    for i, item in enumerate(reversed(history), 1):
+        preview = item.replace('\n', ' ')[:70]
+        _raw(f"  {CYAN}{i:>2}.{RESET}  {WHITE}{sanitize(preview)}{RESET}\n")
+    _raw(f"\n  {DIM}/clip <n> to paste item{RESET}\n\n")
+
+
+# ── /todo ─────────────────────────────────────────────────────────────────────
+def cmd_todo(args: list):
+    sub = args[0].lower() if args else "list"
+
+    if sub == "add" and len(args) > 1:
+        task = " ".join(args[1:])
+        priority = "med"
+        if task.lower().endswith((" high", " med", " low")):
+            *parts, priority = task.split()
+            task = " ".join(parts)
+        item = add_todo(task, priority)
+        _p = {"high": CORAL, "med": AMBER, "low": DIM}.get(item["priority"], DIM)
+        _raw(f"  {GREEN}✓{RESET}  Added #{item['id']}  {_p}[{item['priority'].upper()}]{RESET}  {WHITE}{sanitize(task)}{RESET}\n\n")
+        return
+
+    if sub == "done" and len(args) > 1:
+        try:
+            ok, task = done_todo(int(args[1]))
+            if ok:
+                _raw(f"  {GREEN}✓  Done:{RESET}  {DIM}{sanitize(task)}{RESET}\n\n")
+            else:
+                _raw(f"  {CORAL}{task}{RESET}\n\n")
+        except ValueError:
+            _raw(f"  {DIM}Usage: /todo done <number>{RESET}\n")
+        return
+
+    if sub == "remove" and len(args) > 1:
+        try:
+            ok, task = remove_todo(int(args[1]))
+            _raw(f"  {ok and GREEN or CORAL}{'Removed' if ok else task}:{RESET}  {DIM}{sanitize(task) if ok else ''}{RESET}\n\n")
+        except ValueError:
+            _raw(f"  {DIM}Usage: /todo remove <number>{RESET}\n")
+        return
+
+    if sub == "clear":
+        n = clear_done_todos()
+        _raw(f"  {DIM}Cleared {n} completed tasks.{RESET}\n\n")
+        return
+
+    # Default: list
+    items = list_todos()
+    if not items:
+        _raw(f"  {DIM}No pending tasks. Add one: /todo add <task>{RESET}\n\n")
+        return
+    _raw(f"\n  {VIOLET}{BOLD}TODO  ({len(items)} pending){RESET}\n")
+    _raw(f"  {GOLD}{'─' * 40}{RESET}\n")
+    _PCOL = {"high": CORAL, "med": AMBER, "low": DIM}
+    for i, item in enumerate(items, 1):
+        pc = _PCOL.get(item.get("priority", "med"), DIM)
+        _raw(f"  {VIOLET}{i:>2}.{RESET}  {pc}[{item['priority'].upper()}]{RESET}  {WHITE}{sanitize(item['task'])}{RESET}\n")
+    _raw(f"\n  {DIM}/todo done <n>  /todo remove <n>  /todo clear{RESET}\n\n")
+
+
+# ── /timer ────────────────────────────────────────────────────────────────────
+def cmd_timer(args: list):
+    if not args:
+        _raw(f"  {DIM}Usage: /timer <duration> [label]  e.g. /timer 5m coffee{RESET}\n\n")
+        return
+    duration_str = args[0]
+    label = " ".join(args[1:]) if len(args) > 1 else "Timer"
+
+    def _on_done(lbl):
+        try:
+            send_notification(f"⏰ {lbl}", "Time's up!")
+        except Exception:
+            pass
+        _raw(f"\n  {AMBER}⏰  Timer done:{RESET}  {WHITE}{sanitize(lbl)}{RESET}\n")
+        _render(force=True)
+
+    ok, human = _start_timer(duration_str, label, _on_done)
+    if ok:
+        _raw(f"  {CYAN}⏱  Timer set:{RESET}  {WHITE}{sanitize(label)}{RESET}  {DIM}({human}){RESET}\n\n")
+    else:
+        _raw(f"  {CORAL}{human}{RESET}\n\n")
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -921,6 +1079,43 @@ def handle_slash(raw: str) -> bool:
         set_persona(None)
         _raw(f"\n  {PINK}◈  Normal mode.{RESET}\n\n")
         return True
+    if cmd == "/cancel":
+        cleared = 0
+        if args and args[0] == "--all":
+            cleared = msg_queue.clear()
+        if _worker_busy.is_set():
+            _abort_event.set()
+            if cleared:
+                _raw(f"  {CORAL}⊘  Task cancelled. {cleared} queued task(s) cleared.{RESET}\n")
+            else:
+                _raw(f"  {CORAL}⊘  Cancelling current task...{RESET}\n")
+        elif cleared:
+            _raw(f"  {AMBER}◆  Queue cleared ({cleared} task(s) removed).{RESET}\n")
+        else:
+            _raw(f"  {DIM}Nothing running. Use /cancel --all to also clear the queue.{RESET}\n")
+        return True
+    if cmd == "/stats":
+        cmd_stats(); return True
+    if cmd == "/clips":
+        cmd_clips(args); return True
+    if cmd == "/clip":
+        if not args:
+            _raw(f"  {DIM}Usage: /clip <n>{RESET}\n"); return True
+        try:
+            text = _clip_paste(int(args[0]))
+            _raw(f"  {CYAN}Copied to clipboard:{RESET}  {WHITE}{sanitize(text[:80])}{RESET}\n\n")
+        except ValueError:
+            _raw(f"  {DIM}Usage: /clip <number>{RESET}\n")
+        return True
+    if cmd == "/todo":
+        cmd_todo(args); return True
+    if cmd in ("/timer", "/remind"):
+        cmd_timer(args); return True
+    if cmd == "/wiki":
+        if not args:
+            _raw(f"  {DIM}Usage: /wiki <topic>{RESET}\n"); return True
+        msg_queue.put(f"Look up on Wikipedia: {' '.join(args)}")
+        return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
@@ -976,41 +1171,69 @@ class _PriorityDeque:
     def peek(self) -> list:
         with self._lock: return list(self._d)
 
+    def clear(self) -> int:
+        with self._lock:
+            n = len(self._d)
+            self._d.clear()
+            self._ev.clear()
+            return n
+
+msg_queue = _PriorityDeque()   # module-level so _do_render() can read queue size
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def main_loop():
     global _running, _mode
 
+    # Enable native VT100 on Windows via CONOUT$ (more reliable than STD_OUTPUT_HANDLE)
+    if sys.platform == "win32":
+        try:
+            import ctypes, ctypes.wintypes
+            k32 = ctypes.windll.kernel32
+            # Open the real console output handle — works even when stdout is redirected/wrapped
+            h = k32.CreateFileW(
+                "CONOUT$", 0x40000000, 3, None, 3, 0, None
+            )  # GENERIC_WRITE | FILE_SHARE_READ|WRITE | OPEN_EXISTING
+            if h != ctypes.wintypes.HANDLE(-1).value:
+                m = ctypes.c_ulong()
+                k32.GetConsoleMode(h, ctypes.byref(m))
+                k32.SetConsoleMode(h, m.value | 4)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                k32.CloseHandle(h)
+        except Exception:
+            pass
+        # Now that VT100 is enabled natively, stop colorama from converting sequences —
+        # let ANSI codes pass through directly to the console.
+        try:
+            colorama.deinit()
+        except Exception:
+            pass
+
     import queue as _queue
     tg_queue: _queue.Queue = _queue.Queue()
-    msg_queue = _PriorityDeque()
 
-    # Start Telegram
+    # ── Telegram ──────────────────────────────────────────────────────────────
     if _telegram.enabled:
         _telegram.start(tg_queue)
     else:
-        _raw(f"  {DIM}Telegram not configured — add TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_ID to .env to enable.{RESET}\n")
+        _raw(f"  {DIM}Telegram not configured.{RESET}\n")
 
-    _pending_suggestions: list[str] = []
+    _pending_suggestions: list = []
     _suggestions_lock = threading.Lock()
 
     def _queue_suggestions_after_delay(delay: float = 2.5):
-        import time as _time
-        _time.sleep(delay)
-        suggestions = pop_suggestions()
-        if suggestions:
+        import time as _t; _t.sleep(delay)
+        suggs = pop_suggestions()
+        if suggs:
             with _suggestions_lock:
-                _pending_suggestions.extend(suggestions)
+                _pending_suggestions.extend(suggs)
 
     def _flush_suggestions():
         with _suggestions_lock:
-            suggestions = list(_pending_suggestions)
-            _pending_suggestions.clear()
-        for suggestion in suggestions:
-            _raw(f"\n  {VIOLET}✦ LEARN{RESET}  {WHITE}{sanitize(suggestion)}{RESET}\n")
-            _raw(f"  {DIM}/learn save <n>  — promote to a permanent skill{RESET}\n\n")
+            suggs = list(_pending_suggestions); _pending_suggestions.clear()
+        for s in suggs:
+            _raw(f"  {VIOLET}✦ LEARN{RESET}  {WHITE}{sanitize(s)}{RESET}\n")
+            _raw(f"  {DIM}/learn save <n>  — promote to a permanent skill{RESET}\n")
 
-    # ── Telegram processor ─────────────────────────────────────────────────────
+    # ── Telegram processor ────────────────────────────────────────────────────
     def _tg_processor():
         while _running:
             try:
@@ -1020,7 +1243,7 @@ def main_loop():
             if item is None:
                 break
             user_text, tg_chat_id = item
-            _raw(f"\n  {GOLD}[TG]{RESET}  {WHITE}{sanitize(user_text)}{RESET}\n")
+            _raw(f"  {GOLD}[TG]{RESET}  {WHITE}{sanitize(user_text)}{RESET}\n")
             response = ask_streaming(user_text)
             threading.Thread(target=speak, args=(response,), daemon=True).start()
             extract_and_store_async(user_text, response)
@@ -1031,7 +1254,7 @@ def main_loop():
     if _telegram.enabled:
         threading.Thread(target=_tg_processor, daemon=True, name="TGProcessor").start()
 
-    # ── Message worker (AI calls, non-blocking input) ──────────────────────────
+    # ── Message worker ─────────────────────────────────────────────────────────
     def _worker():
         while _running:
             item = msg_queue.get(timeout=0.3)
@@ -1039,12 +1262,10 @@ def main_loop():
                 continue
             if item == "__STOP__":
                 break
-
             _worker_busy.set()
             _abort_event.clear()
             try:
                 abort_check = lambda: _abort_event.is_set()
-
                 if isinstance(item, tuple):
                     prompt_str, raw_cmd = item
                     _raw(f"  {TEAL}◆ {raw_cmd.split()[0]}{RESET}  {DIM}→ {sanitize(prompt_str)}{RESET}\n")
@@ -1060,181 +1281,179 @@ def main_loop():
             finally:
                 _worker_busy.clear()
                 _abort_event.clear()
-
             threading.Thread(target=speak, args=(response,), daemon=True).start()
             threading.Thread(target=_queue_suggestions_after_delay, daemon=True).start()
             _flush_suggestions()
+            # Show next-task hint if queue is non-empty
+            next_items = msg_queue.peek()
+            if next_items:
+                nxt = next_items[0]
+                preview = (nxt[1] if isinstance(nxt, tuple) else str(nxt))[:60]
+                _raw(f"  {DIM}→ Running next queued task: \"{sanitize(preview)}\"{RESET}\n")
 
     threading.Thread(target=_worker, daemon=True, name="MsgWorker").start()
 
-    # ── Dynamic lexer (includes user /cmd names) ───────────────────────────────
-    class _DynCmdLexer(_CmdLexer):
-        def lex_document(self, document):
-            text  = document.text
-            known = set(_KNOWN_CMDS)
-            for c in list_commands():
-                known.add(f"/{c['name']}")
-            def get_line(lineno):
-                if not text.startswith("/"):
-                    return [("", text)]
-                parts = text.split()
-                cmd   = parts[0].lower() if parts else text.lower()
-                if cmd in known:
-                    return [("class:cmd-valid", text)]
-                if any(k.startswith(cmd) for k in known):
-                    return [("class:cmd-partial", text)]
-                return [("class:cmd-unknown", text)]
-            return get_line
+    # ── Submit helper — called when user presses Enter ─────────────────────────
+    def _submit():
+        raw = ''.join(_inp_buf).strip()
+        _inp_buf.clear()
+        _inp_pos[0] = 0
+        if not raw:
+            _render()
+            return
 
-    # ── Bottom toolbar — shows mode, busy state, queue depth ──────────────────
-    def _toolbar():
-        mode  = _get_mode()
-        busy  = _worker_busy.is_set()
-        qsize = msg_queue.size()
-        parts = [("class:toolbar", f"  ⚡ Jarvis")]
-        if mode:
-            parts.append(("class:toolbar.mode",  f"  [{mode.upper()}]"))
-        if busy:
-            parts.append(("class:toolbar.busy",  "  processing…"))
-        if qsize > 0:
-            parts.append(("class:toolbar.queue", f"  [{qsize} queued]"))
-        parts.append(("class:toolbar.hint",  "  Ctrl+Q: cancel/quit"))
-        cur_m = orchestrator._api.current_model
-        # Show tier indicator: ⚡ light  ◈ heavy
-        parts.append(("class:toolbar.model", f"  {cur_m}"))
-        return parts
+        # Pin to bottom so echoed input + response appear just above the input bar
+        _scroll[0] = 0
+        # Echo the input into the output area
+        _raw(f" {CYAN}○{RESET} {WHITE}{sanitize(raw)}{RESET}\n")
 
-    # ── Ctrl+Q key binding ─────────────────────────────────────────────────────
-    from prompt_toolkit.key_binding import KeyBindings
-    kb = KeyBindings()
-
-    @kb.add("c-q")
-    def _ctrlq(event):
-        global _running
-        if _worker_busy.is_set():
-            _abort_event.set()
-            _raw(f"\n  {CORAL}⊘  Cancelling task...{RESET}\n")
-        else:
-            _running = False
-            event.app.exit(exception=KeyboardInterrupt)
-
-    session = PromptSession(
-        lexer=_DynCmdLexer(),
-        style=_PROMPT_STYLE,
-        key_bindings=kb,
-        bottom_toolbar=_toolbar,
-        refresh_interval=0.5,
-    )
-
-    # Cycling bullet colors for prompt ○ and /first ◆
-    _BULLET_HEX   = ["#57d7ff", "#d7af00", "#af87d7", "#5fd787", "#00af87", "#875f87", "#ff5f5f", "#d7d700"]
-    _BULLET_COLORS = [CYAN, AMBER, VIOLET, GREEN, TEAL, PINK, CORAL, GOLD]
-    _bi = [0]
-    _cur_bullet = ["#57d7ff"]
-
-    def _bullet():
-        c = _BULLET_COLORS[_bi[0] % len(_BULLET_COLORS)]
-        _bi[0] += 1
-        return c
-
-    def _pt_prompt():
-        """Dynamic prompt label showing active mode."""
-        mode = _get_mode()
-        parts = [("fg:" + _cur_bullet[0] + " bold", "\n  ○")]
-        if mode:
-            parts.append(("class:pt-mode", f" [{mode}]"))
-        parts.append(("class:pt-arrow", "  › "))
-        return FormattedText(parts)
-
-    # ── Input loop — input always available, AI runs in worker ────────────────
-    with _patch_stdout():
-        while _running:
-            try:
-                _cur_bullet[0] = _BULLET_HEX[_bi[0] % len(_BULLET_HEX)]
-                _bi[0] += 1
-                raw = session.prompt(_pt_prompt).strip()
-            except (EOFError, KeyboardInterrupt):
-                break
-
-            if not raw:
-                continue
-
-            # ── /first <payload> — priority insert at queue front ──────────────
-            if raw.lower().startswith("/first "):
-                payload = raw[7:].strip()
-                if not payload:
-                    _raw(f"  {DIM}Usage: /first <message or command>{RESET}\n")
-                    continue
-                bc = _bullet()
-                _raw(f"  {bc}◆{RESET}  {WHITE}{sanitize(payload)}{RESET}  {AMBER}[FIRST]{RESET}\n")
-                qsize = msg_queue.size()
-                if qsize:
-                    _raw(f"  {AMBER}↑ pushed to front  [was Q:{qsize}]{RESET}\n")
-                msg_queue.put_first(payload)
-                continue
-
-            if raw.startswith("/"):
-                _parts = raw.strip().split()
-                _cmd0  = _parts[0].lower()
-                _args0 = " ".join(_parts[1:])
-
-                # Translate shortcut commands to natural language for the worker
-                if _cmd0 == "/search":
-                    if not _args0:
-                        _raw(f"  {DIM}Usage: /search <query>{RESET}\n")
-                        continue
-                    qsize = msg_queue.size()
-                    if qsize:
-                        _raw(f"  {DIM}↓ queued [{qsize + 1}]{RESET}\n")
-                    msg_queue.put(f"Search the web for: {_args0}")
-                    continue
-
-                if _cmd0 == "/research":
-                    if not _args0:
-                        _raw(f"  {DIM}Usage: /research <topic>{RESET}\n")
-                        continue
-                    qsize = msg_queue.size()
-                    if qsize:
-                        _raw(f"  {DIM}↓ queued [{qsize + 1}]{RESET}\n")
-                    msg_queue.put(f"Research this topic in depth and write a complete, well-structured report: {_args0}")
-                    continue
-
-                if _cmd0 == "/book":
-                    if not _args0:
-                        _raw(f"  {DIM}Usage: /book <title or author>{RESET}\n")
-                        continue
-                    qsize = msg_queue.size()
-                    if qsize:
-                        _raw(f"  {DIM}↓ queued [{qsize + 1}]{RESET}\n")
-                    msg_queue.put(f"Find and download this book: {_args0}")
-                    continue
-
-                custom = get_command(raw[1:].split()[0])
-                if custom:
-                    qsize = msg_queue.size()
-                    if qsize:
-                        _raw(f"  {DIM}↓ queued [{qsize + 1}]{RESET}\n")
-                    msg_queue.put((custom["prompt"], raw))
-                    continue
-                if not handle_slash(raw):
-                    _raw(f"  {CORAL}Unknown command{RESET}  {DIM}{raw}{RESET}  {CYAN}/help{RESET} {DIM}for help{RESET}\n")
-                if not _running:
-                    break
-                continue
-
-            if raw.lower() in ("exit", "quit", "bye"):
-                handle_slash("/quit")
-                break
-
+        if raw.lower().startswith("/first "):
+            payload = raw[7:].strip()
+            if not payload:
+                _raw(f"  {DIM}Usage: /first <message or command>{RESET}\n"); return
+            _raw(f"  {GOLD}◆{RESET}  {WHITE}{sanitize(payload)}{RESET}  {AMBER}[FIRST]{RESET}\n")
             qsize = msg_queue.size()
             if qsize:
-                _raw(f"  {DIM}↓ queued [{qsize + 1}]{RESET}\n")
-            msg_queue.put(raw)
+                _raw(f"  {AMBER}↑ pushed to front  [was Q:{qsize}]{RESET}\n")
+            msg_queue.put_first(payload)
+            return
+
+        if raw.startswith("/"):
+            _parts = raw.strip().split()
+            _cmd0  = _parts[0].lower()
+            _args0 = " ".join(_parts[1:])
+
+            if _cmd0 == "/search":
+                if not _args0:
+                    _raw(f"  {DIM}Usage: /search <query>{RESET}\n"); return
+                qsize = msg_queue.size()
+                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                msg_queue.put(f"Search the web for: {_args0}"); return
+
+            if _cmd0 == "/research":
+                if not _args0:
+                    _raw(f"  {DIM}Usage: /research <topic>{RESET}\n"); return
+                qsize = msg_queue.size()
+                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                msg_queue.put(f"Research this topic in depth and write a complete, well-structured report: {_args0}"); return
+
+            if _cmd0 == "/book":
+                if not _args0:
+                    _raw(f"  {DIM}Usage: /book <title or author>{RESET}\n"); return
+                qsize = msg_queue.size()
+                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                msg_queue.put(f"Find and download this book: {_args0}"); return
+
+            custom = get_command(raw[1:].split()[0])
+            if custom:
+                qsize = msg_queue.size()
+                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                msg_queue.put((custom["prompt"], raw)); return
+
+            if not handle_slash(raw):
+                _raw(f"  {CORAL}Unknown command{RESET}  {DIM}{raw}{RESET}  {CYAN}/help{RESET} {DIM}for help{RESET}\n")
+            return
+
+        if raw.lower() in ("exit", "quit", "bye"):
+            handle_slash("/quit"); return
+
+        qsize = msg_queue.size()
+        if qsize:
+            _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+        msg_queue.put(raw)
+
+    # ── Blessed two-zone input loop ────────────────────────────────────────────
+    t = _term
+    _last_sz = [t.width, t.height]
+
+    # Redirect stderr to devnull for the TUI session — any stray library
+    # print()/warn() to stderr would corrupt the blessed layout.
+    _real_stderr = sys.stderr
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+    with t.fullscreen(), t.cbreak():
+        _ui_active[0] = True
+        _render()
+
+        while _running:
+            key = t.inkey(timeout=0.05)
+
+            # Resize detection (no SIGWINCH on Windows — poll instead)
+            nw, nh = t.width, t.height
+            if nw != _last_sz[0] or nh != _last_sz[1]:
+                _last_sz[0] = nw; _last_sz[1] = nh
+                _render()
+
+            if not key:
+                continue
+
+            kc = key.code
+            ks = str(key)
+
+            if kc == t.KEY_ENTER or ks in ('\r', '\n'):
+                _submit()
+
+            elif kc == t.KEY_BACKSPACE or ks in ('\x7f', '\x08'):
+                if _inp_pos[0] > 0:
+                    _inp_buf.pop(_inp_pos[0] - 1)
+                    _inp_pos[0] -= 1
+                    _render()
+
+            elif kc == t.KEY_DELETE:
+                if _inp_pos[0] < len(_inp_buf):
+                    _inp_buf.pop(_inp_pos[0]); _render()
+
+            elif kc == t.KEY_LEFT:
+                if _inp_pos[0] > 0:
+                    _inp_pos[0] -= 1; _render()
+
+            elif kc == t.KEY_RIGHT:
+                if _inp_pos[0] < len(_inp_buf):
+                    _inp_pos[0] += 1; _render()
+
+            elif kc == t.KEY_HOME:
+                _inp_pos[0] = 0; _render()
+
+            elif kc == t.KEY_PGUP:
+                out_h = max(t.height - 4, 1)
+                with _out_lock: max_s = max(0, len(_out_buf) - out_h)
+                _scroll[0] = min(_scroll[0] + out_h, max_s); _render()
+
+            elif kc == t.KEY_PGDN:
+                out_h = max(t.height - 4, 1)
+                _scroll[0] = max(0, _scroll[0] - out_h); _render()
+
+            elif kc == t.KEY_UP:
+                with _out_lock: max_s = max(0, len(_out_buf) - 1)
+                _scroll[0] = min(_scroll[0] + 3, max_s); _render()
+
+            elif kc == t.KEY_DOWN:
+                _scroll[0] = max(0, _scroll[0] - 3); _render()
+
+            elif kc == t.KEY_END:
+                _scroll[0] = 0
+                _inp_pos[0] = len(_inp_buf); _render()
+
+            elif ks == '\x11':   # Ctrl+Q
+                if _worker_busy.is_set():
+                    _abort_event.set()
+                    _raw(f"  {CORAL}⊘  Cancelling task...{RESET}\n")
+                else:
+                    _running = False; break
+
+            elif ks == '\x03':   # Ctrl+C
+                _running = False; break
+
+            elif not key.is_sequence and ks.isprintable():
+                _inp_buf.insert(_inp_pos[0], ks)
+                _inp_pos[0] += 1; _render()
 
     msg_queue.put("__STOP__")
     if _telegram.enabled:
         tg_queue.put(None)
-    _raw(f"\n  {DIM}Jarvis offline.{RESET}\n\n")
+
+    sys.stderr.close()
+    sys.stderr = _real_stderr
 
 # ── Wake-word voice mode ──────────────────────────────────────────────────────
 def wake_word_mode():

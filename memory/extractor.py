@@ -18,8 +18,14 @@ from memory.long_term import store
 from memory import patterns as _patterns
 from core import profile as _profile
 
-# Lightweight extractor manager — shared instance
-_extractor_api = APIManager()
+# Lazy singleton — initialized on first use to avoid double-init at import time
+_extractor_api: "APIManager | None" = None
+
+def _get_api() -> APIManager:
+    global _extractor_api
+    if _extractor_api is None:
+        _extractor_api = APIManager()
+    return _extractor_api
 
 # ── Extraction prompt ─────────────────────────────────────────────────────────
 _EXTRACT_PROMPT = """Analyze this single conversation turn and return a JSON object with these keys:
@@ -60,12 +66,13 @@ def extract_and_store_async(user_msg: str, assistant_msg: str) -> None:
 
 def _run(user_msg: str, assistant_msg: str) -> None:
     try:
-        client = _extractor_api.get_client()
+        api = _get_api()
+        client = api.get_client()
         if client is None:
             return
 
         resp = client.chat.completions.create(
-            model=_extractor_api.current_model,
+            model=api.current_model,
             messages=[{
                 "role": "user",
                 "content": _EXTRACT_PROMPT.format(

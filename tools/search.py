@@ -71,7 +71,10 @@ def _search_tavily(query: str, max_results: int, api_key: str) -> str:
 
 def _search_duckduckgo(query: str, max_results: int) -> str:
     try:
-        from duckduckgo_search import DDGS
+        import warnings as _w
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            from duckduckgo_search import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
 

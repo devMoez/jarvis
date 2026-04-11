@@ -352,6 +352,20 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "wiki_search",
+            "description": "Look up a topic on Wikipedia. Returns a summary and key facts. Use when the user asks about a person, place, concept, or historical event.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "The topic to look up on Wikipedia"},
+                },
+                "required": ["topic"],
+            },
+        },
+    },
 ]
 
 

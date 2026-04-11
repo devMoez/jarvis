@@ -17,8 +17,6 @@ PROVIDERS: dict[str, dict] = {
         "env_key":  "OPENROUTER_API_KEY",
         "models":   [
             "meta-llama/llama-4-maverick",
-            "google/gemini-2.0-flash-001",
-            "anthropic/claude-3-haiku-20240307",
         ],
         "headers":  {
             "HTTP-Referer": "https://github.com/jarvis-ai",
@@ -31,14 +29,8 @@ PROVIDERS: dict[str, dict] = {
 # light → fast model for simple ops (search, file I/O, short Q&A, open app)
 # heavy → best model for research, writing, planning, coding, long reasoning
 _TIER_MODELS: dict[str, list[tuple[str, str]]] = {
-    "light": [
-        ("openrouter", "meta-llama/llama-4-maverick"),
-        ("openrouter", "google/gemini-2.0-flash-001"),
-    ],
-    "heavy": [
-        ("openrouter", "meta-llama/llama-4-maverick"),
-        ("openrouter", "google/gemini-2.0-flash-001"),
-    ],
+    "light": [("openrouter", "meta-llama/llama-4-maverick")],
+    "heavy": [("openrouter", "meta-llama/llama-4-maverick")],
 }
 
 # Input aliases → canonical provider name
@@ -126,6 +118,7 @@ def make_client(provider: str, api_key: str = "") -> Optional[openai.OpenAI]:
         api_key=key,
         base_url=cfg["base_url"],
         default_headers=cfg.get("headers", {}),
+        timeout=60.0,
     )
 
 
@@ -146,10 +139,6 @@ class APIManager:
                 chain.append(("openrouter", m, key))
         self._flat = chain
         self._index = 0
-        print(f"[API] Chain built: {len(self._flat)} entries")
-        for i, (provider, model, k) in enumerate(self._flat):
-            masked = k[:8] + "...." + k[-4:]
-            print(f"  [{i}] {provider} / {model} / {masked}")
 
     def rebuild(self) -> None:
         """Rebuild after adding a new key."""

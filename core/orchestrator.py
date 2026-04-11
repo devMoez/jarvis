@@ -4,6 +4,8 @@ from typing import Generator, Callable, Optional
 from core.conversation import ConversationHistory
 from core.tool_registry import ToolRegistry
 from core.api_manager import APIManager
+from core import stats as _stats
+from core.error_log import log_error
 
 TOOL_EVENT_PREFIX = "__TOOL__"
 
@@ -71,13 +73,15 @@ class Orchestrator:
                         tools=tools,
                         tool_choice="auto",
                         temperature=0.7,
-                        max_tokens=4096,
+                        max_tokens=2048,
                         stream=True,
+                        stream_options={"include_usage": True},
                     )
                 except Exception as e:
-                    print(f"[API] Model failed: {self._api.current_model} — {type(e).__name__}: {e}")
+                    last_err = f"{type(e).__name__}: {e}"
+                    log_error("orchestrator", last_err)
                     if not self._api.try_next():
-                        msg = "All models unavailable right now, sir."
+                        msg = f"API error — {last_err}"
                         yield msg
                         self.history.add_assistant(msg)
                         return
@@ -93,6 +97,15 @@ class Orchestrator:
                     yield msg
                     self.history.add_assistant(full_response + msg)
                     return
+
+                # Final usage chunk (no choices when include_usage=True)
+                if not chunk.choices:
+                    if chunk.usage:
+                        try:
+                            _stats.record(chunk.usage.prompt_tokens, chunk.usage.completion_tokens)
+                        except Exception:
+                            pass
+                    continue
 
                 choice = chunk.choices[0]
                 delta  = choice.delta
