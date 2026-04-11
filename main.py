@@ -17,13 +17,11 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 import logging
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
-
-sys.stderr = io.TextIOWrapper(open(os.devnull, "wb"), encoding="utf-8")
+logging.getLogger("chromadb").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
 
 import colorama
-# convert=True  → colorama intercepts ANSI codes and calls Win32 console API (works in ALL terminals)
-# strip=False   → don't strip sequences (convert is doing the job)
-# This is more reliable than relying on VT100 terminal support.
 colorama.init(autoreset=False, convert=True, strip=False)
 
 from dotenv import load_dotenv
@@ -277,15 +275,9 @@ def sanitize(t: str) -> str:
 def cls():
     os.system("cls" if os.name == "nt" else "clear")
 
-if sys.platform == "win32":
-    from colorama.ansitowin32 import AnsiToWin32 as _AnsiToWin32
-    def _raw(text: str, end: str = "") -> None:
-        _AnsiToWin32(sys.stdout, convert=True, strip=False).write(text + end)
-        sys.stdout.flush()
-else:
-    def _raw(text: str, end: str = "") -> None:
-        sys.stdout.write(text + end)
-        sys.stdout.flush()
+def _raw(text: str, end: str = "") -> None:
+    sys.stdout.write(text + end)
+    sys.stdout.flush()
 
 def _clear_line() -> None:
     sys.stdout.write("\r" + " " * 70 + "\r")
@@ -1289,7 +1281,6 @@ def _test_openrouter_connection() -> None:
 
 def main():
     print_banner()
-    _test_openrouter_connection()
 
     if "--voice" in sys.argv:
         wake_word_mode()
