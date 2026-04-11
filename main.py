@@ -74,6 +74,7 @@ from tools.todo import add_todo, list_todos, done_todo, remove_todo, clear_done 
 from tools.timer import start_timer as _start_timer
 from core.stats import get_today as _stats_today, get_all as _stats_all
 from core.error_log import log_error
+from audio.tts_elevenlabs import tts_speak as _tts_speak, tts_speak_async as _tts_async, list_voices as _tts_voices, get_usage_summary as _tts_usage
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -124,6 +125,7 @@ _KNOWN_CMDS = {
     "/wiki", "/stats", "/clips", "/clip",
     "/todo", "/timer", "/remind",
     "/yt", "/transcript", "/papers",
+    "/speak", "/voices", "/tts",
 }
 
 
@@ -1023,6 +1025,59 @@ def cmd_timer(args: list):
         _raw(f"  {CORAL}{human}{RESET}\n\n")
 
 
+# ── /speak ────────────────────────────────────────────────────────────────────
+def cmd_speak(args: list, raw_text: str = ""):
+    """
+    /speak <text>
+    /speak --voice <name> <text>
+    /speak --save <text>
+    /speak --file <path>
+    """
+    if not args:
+        _raw(f"  {DIM}Usage: /speak <text>  or  /speak --voice <name> <text>{RESET}\n\n")
+        return
+
+    voice = ""
+    save  = False
+    text  = ""
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--voice" and i + 1 < len(args):
+            voice = args[i + 1]; i += 2
+        elif args[i] == "--save":
+            save = True; i += 1
+        elif args[i] == "--file" and i + 1 < len(args):
+            try:
+                text = open(args[i + 1], encoding="utf-8").read()
+            except Exception as e:
+                _raw(f"  {CORAL}Could not read file: {e}{RESET}\n\n")
+                return
+            i += 2
+        else:
+            text = " ".join(args[i:]); break
+
+    if not text.strip():
+        _raw(f"  {DIM}No text to speak.{RESET}\n\n")
+        return
+
+    char_count = len(text)
+    _raw(f"  {DIM}Speaking {char_count:,} chars via TTS...{RESET}\n")
+
+    def _do():
+        ok, result = _tts_speak(text, voice=voice, save=save)
+        if ok:
+            if save:
+                _raw(f"  {GREEN}✓  Saved:{RESET}  {DIM}{result}{RESET}\n\n")
+            else:
+                _raw(f"  {GREEN}✓  Done{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}TTS failed: {result}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1122,6 +1177,10 @@ def handle_slash(raw: str) -> bool:
         cmd_todo(args); return True
     if cmd in ("/timer", "/remind"):
         cmd_timer(args); return True
+    if cmd in ("/speak", "/tts"):
+        cmd_speak(args, " ".join(args)); return True
+    if cmd == "/voices":
+        _raw(f"\n{sanitize(_tts_voices())}\n\n"); return True
     if cmd == "/wiki":
         if not args:
             _raw(f"  {DIM}Usage: /wiki <topic>{RESET}\n"); return True
