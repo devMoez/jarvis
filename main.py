@@ -75,6 +75,7 @@ from tools.timer import start_timer as _start_timer
 from core.stats import get_today as _stats_today, get_all as _stats_all
 from core.error_log import log_error
 from audio.tts_elevenlabs import tts_speak as _tts_speak, tts_speak_async as _tts_async, list_voices as _tts_voices, get_usage_summary as _tts_usage
+from audio.stt_advanced import transcribe_file as _transcribe_file, listen_once as _listen_once
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -126,6 +127,7 @@ _KNOWN_CMDS = {
     "/todo", "/timer", "/remind",
     "/yt", "/transcript", "/papers",
     "/speak", "/voices", "/tts",
+    "/transcribe", "/listen",
 }
 
 
@@ -489,6 +491,34 @@ def cmd_help():
     _cmd_row("/search <query>",       "Web search (Tavily or DuckDuckGo)",            GREEN)
     _cmd_row("/research <topic>",     "Deep research: scrape sources, full report",   GREEN)
     _cmd_row("/book <title/author>",  "Find & download book from LibGen",             GREEN)
+    _cmd_row("/wiki <topic>",         "Wikipedia lookup",                             GREEN)
+    _cmd_row("/papers <query>",       "Search academic papers (Semantic Scholar)",    GREEN)
+    _cmd_row("/yt <url>",             "Fetch YouTube transcript",                     GREEN)
+
+    _section("TTS — Text to Speech", AMBER)
+    _cmd_row("/speak <text>",          "Speak text aloud (ElevenLabs → OpenAI → edge-tts)", AMBER)
+    _cmd_row("/speak --voice <name> <text>", "Use a specific voice",                 AMBER)
+    _cmd_row("/speak --save <text>",   "Generate audio without playing",             AMBER)
+    _cmd_row("/speak --file <path>",   "Read entire file aloud",                     AMBER)
+    _cmd_row("/voices",                "List all available TTS voices",              AMBER)
+
+    _section("STT — Transcription", CYAN)
+    _cmd_row("/transcribe <file>",     "Transcribe an audio file",                   CYAN)
+    _cmd_row("/transcribe <f> --translate",  "Translate to English while transcribing", CYAN)
+    _cmd_row("/transcribe <f> --summary",    "Add bullet-point summary",            CYAN)
+    _cmd_row("/transcribe <f> --speakers",   "Label speakers in transcript",        CYAN)
+    _cmd_row("/transcribe <f> --lang <code>","Force language (e.g. fr, es, de)",   CYAN)
+    _cmd_row("/listen",                "Record from mic and transcribe",             CYAN)
+    _cmd_row("/listen --save",         "Record, transcribe, and save file",         CYAN)
+
+    _section("Utilities", GOLD)
+    _cmd_row("/stats",                 "Token usage today + all-time",              GOLD)
+    _cmd_row("/clips",                 "Clipboard history (last 20)",               GOLD)
+    _cmd_row("/clip <n>",              "Paste clipboard item n back to clipboard",  GOLD)
+    _cmd_row("/todo add <task>",       "Add a TODO item",                           GOLD)
+    _cmd_row("/todo list",             "Show all todos",                            GOLD)
+    _cmd_row("/todo done <n>",         "Mark todo as done",                         GOLD)
+    _cmd_row("/timer <duration> [lbl]","Countdown timer (5m, 1h30m, etc.)",        GOLD)
 
     _section("Task History", VIOLET)
     _cmd_row("/memory tasks",         "Show last 20 task queries",                    VIOLET)
@@ -1078,6 +1108,113 @@ def cmd_speak(args: list, raw_text: str = ""):
     threading.Thread(target=_do, daemon=True).start()
 
 
+# ── /transcribe ───────────────────────────────────────────────────────────────
+def cmd_transcribe(args: list):
+    """
+    /transcribe <file>
+    /transcribe <file> --translate
+    /transcribe <file> --summary
+    /transcribe <file> --speakers
+    /transcribe <file> --lang <code>
+    Flags can be combined.
+    """
+    if not args:
+        _raw(
+            f"\n  {BOLD}Usage:{RESET}  /transcribe <audio-file> [flags]\n"
+            f"  {DIM}--translate    translate to English\n"
+            f"  --summary      add bullet-point summary (AssemblyAI)\n"
+            f"  --speakers     label speakers (AssemblyAI)\n"
+            f"  --lang <code>  e.g. fr, es, de (auto-detect if omitted)\n"
+            f"  --no-save      don't save to data/transcripts/{RESET}\n\n"
+        )
+        return
+
+    translate = False
+    summarize = False
+    speakers  = False
+    save      = True
+    language  = None
+    file_path = None
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--translate":
+            translate = True; i += 1
+        elif args[i] == "--summary":
+            summarize = True; i += 1
+        elif args[i] == "--speakers":
+            speakers = True; i += 1
+        elif args[i] == "--no-save":
+            save = False; i += 1
+        elif args[i] == "--lang" and i + 1 < len(args):
+            language = args[i + 1]; i += 2
+        elif file_path is None:
+            file_path = args[i]; i += 1
+        else:
+            i += 1
+
+    if not file_path:
+        _raw(f"  {CORAL}No file specified.{RESET}\n"); return
+
+    if not os.path.exists(file_path):
+        _raw(f"  {CORAL}File not found: {file_path}{RESET}\n"); return
+
+    flags_str = " ".join(
+        f for f, v in [
+            ("translate", translate), ("summary", summarize),
+            ("speakers", speakers), (f"lang={language}", bool(language)),
+        ] if v
+    )
+    _raw(f"  {DIM}Transcribing {os.path.basename(file_path)}"
+         f"{' [' + flags_str + ']' if flags_str else ''}...{RESET}\n")
+
+    def _do():
+        ok, text, saved = _transcribe_file(
+            file_path, translate=translate, summarize=summarize,
+            speakers=speakers, language=language, save=save,
+        )
+        if ok:
+            _raw(f"\n{sanitize(text)}\n\n")
+            if saved:
+                _raw(f"  {GREEN}✓  Saved:{RESET}  {DIM}{saved}{RESET}\n\n")
+        else:
+            _raw(f"  {CORAL}Transcription failed: {sanitize(text)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+# ── /listen ────────────────────────────────────────────────────────────────────
+def cmd_listen(args: list):
+    """
+    /listen           — record from mic and transcribe
+    /listen --save    — record, transcribe, save to data/transcripts/
+    /listen --lang <code>
+    """
+    save_file = "--save" in args
+    language  = None
+    if "--lang" in args:
+        idx = args.index("--lang")
+        if idx + 1 < len(args):
+            language = args[idx + 1]
+
+    _raw(f"  {DIM}Listening... (speak, then pause to stop){RESET}\n")
+
+    def _do():
+        ok, text, saved = _listen_once(save=save_file, language=language)
+        if ok:
+            _raw(f"\n  {CYAN}◈  Heard:{RESET}  {WHITE}{sanitize(text)}{RESET}\n")
+            if saved:
+                _raw(f"  {GREEN}✓  Saved:{RESET}  {DIM}{saved}{RESET}\n\n")
+            else:
+                _raw("\n")
+        else:
+            _raw(f"  {CORAL}Listen failed: {sanitize(text)}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1196,6 +1333,10 @@ def handle_slash(raw: str) -> bool:
             _raw(f"  {DIM}Usage: /papers <query>{RESET}\n"); return True
         msg_queue.put(f"Search academic papers on Semantic Scholar for: {' '.join(args)}")
         return True
+    if cmd == "/transcribe":
+        cmd_transcribe(args); return True
+    if cmd == "/listen":
+        cmd_listen(args); return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
