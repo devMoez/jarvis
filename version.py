@@ -1,3 +1,3 @@
-VERSION       = "1.2.0"
+VERSION       = "1.7.0"
 API_PROVIDER  = "OpenRouter"
 AUTHOR        = "Moez"

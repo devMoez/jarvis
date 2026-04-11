@@ -1,0 +1,41 @@
+# Claude Code — files and directories to never read or index
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Version control
+.git/
+.gitignore
+
+# Python runtime
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+
+# ChromaDB internal files (reading these corrupts the vector index)
+data/chroma_db/
+
+# Browser session profiles (binary Chromium profile data, not human-readable)
+data/browser_sessions/
+
+# Audio / model binaries
+models/
+audio/__pycache__/
+*.mp3
+*.wav
+*.onnx
+
+# Logs
+data/logs/
+
+# Node (not used but just in case)
+node_modules/

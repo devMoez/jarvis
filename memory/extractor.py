@@ -8,21 +8,18 @@ After each turn:
                                   → when threshold hit, queue a skill suggestion
 
 Runs fully async so it never slows the main loop.
+Uses APIManager so it benefits from the same provider chain as the main orchestrator.
 """
 import json
 import threading
 
-import openai
-from config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, LLM_FALLBACK_MODEL
+from core.api_manager import APIManager
 from memory.long_term import store
 from memory import patterns as _patterns
 from core import profile as _profile
 
-_client = openai.OpenAI(
-    api_key=OPENROUTER_API_KEY,
-    base_url=OPENROUTER_BASE_URL,
-    default_headers={"HTTP-Referer": "https://jarvis.local", "X-Title": "Jarvis AI"},
-)
+# Lightweight extractor manager — shared instance
+_extractor_api = APIManager()
 
 # ── Extraction prompt ─────────────────────────────────────────────────────────
 _EXTRACT_PROMPT = """Analyze this single conversation turn and return a JSON object with these keys:
@@ -63,8 +60,12 @@ def extract_and_store_async(user_msg: str, assistant_msg: str) -> None:
 
 def _run(user_msg: str, assistant_msg: str) -> None:
     try:
-        resp = _client.chat.completions.create(
-            model=LLM_FALLBACK_MODEL,
+        client = _extractor_api.get_client()
+        if client is None:
+            return
+
+        resp = client.chat.completions.create(
+            model=_extractor_api.current_model,
             messages=[{
                 "role": "user",
                 "content": _EXTRACT_PROMPT.format(
