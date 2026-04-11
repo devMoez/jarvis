@@ -76,6 +76,16 @@ from core.stats import get_today as _stats_today, get_all as _stats_all
 from core.error_log import log_error
 from audio.tts_elevenlabs import tts_speak as _tts_speak, tts_speak_async as _tts_async, list_voices as _tts_voices, get_usage_summary as _tts_usage
 from audio.stt_advanced import transcribe_file as _transcribe_file, listen_once as _listen_once
+from tools.scheduler import (
+    add_schedule as _sched_add, list_schedules as _sched_list,
+    remove_schedule as _sched_remove, clear_schedules as _sched_clear,
+    toggle_schedule as _sched_toggle, fmt_schedule_list as _sched_fmt,
+    start_scheduler as _start_scheduler,
+)
+from tools.file_organizer import (
+    organize_directory as _organize_dir, fmt_organize_result as _organize_fmt,
+    undo_organize as _organize_undo, list_manifests as _organize_manifests,
+)
 from memory.task_memory import task_memory
 from tools.browser import (
     open_url, scrape_page,
@@ -128,6 +138,7 @@ _KNOWN_CMDS = {
     "/yt", "/transcript", "/papers",
     "/speak", "/voices", "/tts",
     "/transcribe", "/listen",
+    "/schedule", "/organize",
 }
 
 
@@ -251,6 +262,15 @@ registry.register("search_papers",        search_papers)
 
 # Start clipboard background tracker
 _clip_start()
+
+# Start scheduler — fires scheduled tasks by injecting them into msg_queue
+# (msg_queue is defined later in the module; use a lambda to defer the reference)
+def _sched_on_trigger(label: str, action: str) -> None:
+    try:
+        _raw(f"\n  {GOLD}◆ Scheduled task fired:{RESET}  {DIM}[{label}]{RESET}  {WHITE}{sanitize(action)}{RESET}\n")
+        msg_queue.put(action)
+    except Exception:
+        pass
 
 orchestrator = Orchestrator(tool_registry=registry)
 
@@ -510,6 +530,19 @@ def cmd_help():
     _cmd_row("/transcribe <f> --lang <code>","Force language (e.g. fr, es, de)",   CYAN)
     _cmd_row("/listen",                "Record from mic and transcribe",             CYAN)
     _cmd_row("/listen --save",         "Record, transcribe, and save file",         CYAN)
+
+    _section("Scheduler", AMBER)
+    _cmd_row("/schedule list",                   "Show all scheduled tasks",        AMBER)
+    _cmd_row("/schedule add <lbl> <when> -- <action>", "Add a scheduled task",     AMBER)
+    _cmd_row("/schedule remove <id>",            "Remove a schedule",               AMBER)
+    _cmd_row("/schedule pause/resume <id>",      "Pause or resume a schedule",      AMBER)
+    _cmd_row("/schedule clear",                  "Remove all schedules",            AMBER)
+
+    _section("File Organizer", TEAL)
+    _cmd_row("/organize <dir>",            "Sort files into subfolders by type",    TEAL)
+    _cmd_row("/organize <dir> --dry-run",  "Preview — nothing is moved",            TEAL)
+    _cmd_row("/organize <dir> --recursive","Include subdirectory files",            TEAL)
+    _cmd_row("/organize undo",             "Reverse the last organize operation",   TEAL)
 
     _section("Utilities", GOLD)
     _cmd_row("/stats",                 "Token usage today + all-time",              GOLD)
@@ -1215,6 +1248,147 @@ def cmd_listen(args: list):
     threading.Thread(target=_do, daemon=True).start()
 
 
+# ── /schedule ─────────────────────────────────────────────────────────────────
+def cmd_schedule(args: list):
+    """
+    /schedule list
+    /schedule add <label> <when> -- <action>
+        when:   "every 30m" | "every 2h" | "daily 09:00" | "hourly" | "2025-12-31 08:00"
+        action: message to send to Jarvis when triggered
+    /schedule remove <id>
+    /schedule pause <id>
+    /schedule resume <id>
+    /schedule clear
+    """
+    if not args or args[0] in ("list", "ls", ""):
+        entries = _sched_list()
+        _raw(f"\n  {BOLD}{CYAN}Scheduled Tasks{RESET}\n")
+        _raw(f"  {DIM}{_sched_fmt(entries)}{RESET}\n\n")
+        return
+
+    sub = args[0].lower()
+
+    if sub == "remove" and len(args) > 1:
+        try:
+            ok = _sched_remove(int(args[1]))
+            if ok:
+                _raw(f"  {GREEN}✓  Removed schedule #{args[1]}.{RESET}\n\n")
+            else:
+                _raw(f"  {CORAL}No schedule with id {args[1]}.{RESET}\n\n")
+        except ValueError:
+            _raw(f"  {DIM}Usage: /schedule remove <id>{RESET}\n")
+        return
+
+    if sub in ("pause", "disable") and len(args) > 1:
+        try:
+            _sched_toggle(int(args[1]), False)
+            _raw(f"  {AMBER}◆  Schedule #{args[1]} paused.{RESET}\n\n")
+        except ValueError:
+            _raw(f"  {DIM}Usage: /schedule pause <id>{RESET}\n")
+        return
+
+    if sub in ("resume", "enable") and len(args) > 1:
+        try:
+            _sched_toggle(int(args[1]), True)
+            _raw(f"  {GREEN}✓  Schedule #{args[1]} resumed.{RESET}\n\n")
+        except ValueError:
+            _raw(f"  {DIM}Usage: /schedule resume <id>{RESET}\n")
+        return
+
+    if sub == "clear":
+        n = _sched_clear()
+        _raw(f"  {AMBER}◆  Cleared {n} scheduled task(s).{RESET}\n\n")
+        return
+
+    if sub == "add":
+        # /schedule add <label> <when...> -- <action...>
+        rest = args[1:]
+        rest_str = " ".join(rest)
+        if "--" not in rest_str:
+            _raw(
+                f"  {DIM}Usage: /schedule add <label> <when> -- <action>\n"
+                f"  Examples:\n"
+                f"    /schedule add morning daily 09:00 -- What's on my agenda today?\n"
+                f"    /schedule add ping every 30m -- search web for AI news\n"
+                f"    /schedule add once 2025-12-31 23:59 -- Happy new year reminder{RESET}\n\n"
+            )
+            return
+        sep_idx = rest_str.index(" -- ")
+        before  = rest_str[:sep_idx].strip()
+        action  = rest_str[sep_idx + 4:].strip()
+        tokens  = before.split()
+        if not tokens:
+            _raw(f"  {CORAL}No label/when given.{RESET}\n"); return
+        label   = tokens[0]
+        when    = " ".join(tokens[1:]) if len(tokens) > 1 else tokens[0]
+        once    = not any(when.lower().startswith(p) for p in ("every ", "daily ", "hourly"))
+        try:
+            entry = _sched_add(label, when, action, once=once)
+            nr = entry.get("next_run", "?")
+            if nr and nr != "?":
+                import datetime as _dt
+                try:
+                    nr = _dt.datetime.fromisoformat(nr).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+            _raw(f"  {GREEN}✓  Schedule #{entry['id']} '{label}' — next: {nr}{RESET}\n\n")
+        except Exception as e:
+            _raw(f"  {CORAL}Failed to add schedule: {e}{RESET}\n\n")
+        return
+
+    _raw(f"  {DIM}Usage: /schedule [list|add|remove|pause|resume|clear]{RESET}\n")
+
+
+# ── /organize ─────────────────────────────────────────────────────────────────
+def cmd_organize(args: list):
+    """
+    /organize <directory>            — sort files into subfolders by type
+    /organize <directory> --dry-run  — preview without moving anything
+    /organize <directory> --recursive— include subdirectory files
+    /organize undo                   — reverse the last organize operation
+    /organize undo <manifest_path>   — reverse a specific manifest
+    """
+    if not args:
+        _raw(
+            f"\n  {BOLD}Usage:{RESET}  /organize <directory> [flags]\n"
+            f"  {DIM}--dry-run    Preview only — nothing is moved\n"
+            f"  --recursive  Include files in subdirectories\n"
+            f"  undo         Reverse last organize operation{RESET}\n\n"
+        )
+        return
+
+    if args[0].lower() == "undo":
+        manifest = args[1] if len(args) > 1 else None
+        _raw(f"  {DIM}Undoing last organize...{RESET}\n")
+        result = _organize_undo(manifest)
+        if "error" in result:
+            _raw(f"  {CORAL}Error: {result['error']}{RESET}\n\n")
+        else:
+            _raw(f"  {GREEN}✓  Restored {result['restored']} file(s)"
+                 f"{', ' + str(result['failed']) + ' failed' if result['failed'] else ''}{RESET}\n\n")
+        return
+
+    directory   = args[0]
+    dry_run     = "--dry-run" in args or "--preview" in args
+    recursive   = "--recursive" in args or "-r" in args
+
+    if not os.path.isdir(directory):
+        _raw(f"  {CORAL}Not a valid directory: {directory}{RESET}\n"); return
+
+    mode_str = "[DRY RUN] " if dry_run else ""
+    _raw(f"  {DIM}{mode_str}Organizing {directory}...{RESET}\n")
+
+    def _do():
+        try:
+            result = _organize_dir(directory, dry_run=dry_run, recursive=recursive)
+            _raw(f"\n{_organize_fmt(result)}\n\n")
+        except Exception as e:
+            _raw(f"  {CORAL}Organize failed: {e}{RESET}\n\n")
+        _render(force=True)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 # ── Slash command router ──────────────────────────────────────────────────────
 def handle_slash(raw: str) -> bool:
     global _mode, _running
@@ -1337,6 +1511,10 @@ def handle_slash(raw: str) -> bool:
         cmd_transcribe(args); return True
     if cmd == "/listen":
         cmd_listen(args); return True
+    if cmd == "/schedule":
+        cmd_schedule(args); return True
+    if cmd == "/organize":
+        cmd_organize(args); return True
     if cmd in ("/quit", "/exit", "/bye"):
         speak("Goodbye, sir.")
         _running = False
@@ -1730,6 +1908,7 @@ def _test_openrouter_connection() -> None:
 def main():
     print_banner()
     _test_openrouter_connection()
+    _start_scheduler(_sched_on_trigger)
 
     if "--voice" in sys.argv:
         wake_word_mode()
