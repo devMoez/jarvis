@@ -66,14 +66,14 @@
 ---
 
 ## AI Engine
-- LLM: OpenRouter free models with automatic fallback rotation
-  - Primary: `openai/gpt-oss-120b:free`
-  - Fallback: `meta-llama/llama-3.3-70b-instruct:free`
-  - Fallback: `qwen/qwen3-coder:free`
-  - Fallback: `meta-llama/llama-3.2-3b-instruct:free`
+- LLM: OpenRouter with task-based tier routing
+  - Router: `google/gemini-flash-1.5-8b` (Fast classification)
+  - Light: `meta-llama/llama-3.1-8b-instruct` (Casual chat)
+  - Heavy: `anthropic/claude-3.5-sonnet` (Complex tasks/reasoning)
+  - Coder: `qwen/qwen-2.5-coder-32b-instruct` (Coding/automation)
 - Streaming responses (token by token)
 - Tool calling loop (up to 10 rounds per query)
-- Model rotation on rate limit or error
+- Multi-tier routing for cost/intelligence optimization
 
 ---
 

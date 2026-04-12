@@ -1,4 +1,4 @@
-# CLAUDE.md — Jarvis AI Project Reference
+# AGENTS.md — Jarvis AI Project Reference
 
 > **Read this file before every session. Do not re-explore the codebase.**
 > This document is the authoritative map of every file, feature, rule, and known issue.
@@ -17,19 +17,6 @@ Iron Man–inspired CLI. Text + voice input. Streaming LLM responses via Gemini 
 - **Platform:** Windows 11 only (Windows-specific paths, subprocess calls, power commands)
 - **Python:** 3.14 (venv at `./venv/`)
 
-## Latest Updates
-
-- Added explicit 3-lane model routing: `light` for normal prompts, `heavy` for planning/research, and `coder` for coding or automation tasks.
-- OpenRouter now supports a persistent rotating key pool via `OPENROUTER_API_KEY` plus numbered slots like `OPENROUTER_API_KEY_2`.
-- Gemini-only boot is now allowed; startup no longer hard-fails just because `OPENROUTER_API_KEY` is missing.
-- Active `/mode` now persists across restarts in `data/active_mode.json`.
-- Startup banner now shows the active model and whether the conversation memory is warm or fresh.
-- Orchestrator now retries plain chat when a model rejects tool calling or when the tool schema pushes the prompt over the current free/credit budget.
-- Runtime is now OpenRouter-only: Gemini was removed from startup checks, provider listings, and the sample env file.
-- Routing now uses one fixed router model to classify each request once, then one fixed model per lane (`light`, `heavy`, `coder`) with API-key rotation only.
-- Router/light models were switched away from Gemma after OpenRouter returned `Developer instruction is not enabled` errors through the Google AI Studio provider path.
-- Planner/coder lanes were moved to cheaper working models and streaming token caps were lowered to reduce OpenRouter credit errors.
-
 ---
 
 ## Full Project Structure
@@ -44,11 +31,11 @@ jarvis/
 ├── test_imports.py              # Sanity-check import script (not used in prod)
 ├── pyproject.toml               # Package metadata, entry-point: jarvis = "main:main"
 ├── requirements.txt             # All Python dependencies (pinned with >=)
-├── .env                         # API keys — never commit, never read by Claude
+├── .env                         # API keys — never commit, never read by Codex
 ├── .env.example                 # Template: OPENROUTER_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_ID
 ├── .gitignore                   # Standard ignores
 ├── README.md                    # User-facing docs
-├── FEATURES.md                  # Feature list (may be outdated — CLAUDE.md is authoritative)
+├── FEATURES.md                  # Feature list (may be outdated — AGENTS.md is authoritative)
 │
 ├── core/
 │   ├── __init__.py

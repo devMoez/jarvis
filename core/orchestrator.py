@@ -8,6 +8,49 @@ from core import stats as _stats
 from core.error_log import log_error
 
 TOOL_EVENT_PREFIX = "__TOOL__"
+_MAX_TOKENS_BY_TIER = {
+    "light": 1024,
+    "heavy": 4096,
+    "coder": 4096,
+}
+
+
+def _is_quota_or_rate_limit(error_text: str) -> bool:
+    lower = error_text.lower()
+    markers = (
+        "402",
+        "429",
+        "credits",
+        "quota",
+        "rate limit",
+        "too many requests",
+        "resource_exhausted",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _is_tool_use_unsupported(error_text: str) -> bool:
+    lower = error_text.lower()
+    markers = (
+        "support tool use",
+        "tool use",
+        "tool_choice",
+        "tools",
+        "function calling",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _should_retry_without_tools(error_text: str) -> bool:
+    lower = error_text.lower()
+    markers = (
+        "prompt tokens limit exceeded",
+        "context length",
+        "context window",
+        "maximum context length",
+        "too many input tokens",
+    )
+    return any(marker in lower for marker in markers)
 
 
 class Orchestrator:
@@ -36,11 +79,11 @@ class Orchestrator:
           "__TOOL__tool_name"  — tool about to execute (display only)
           "token"              — streamed text token
         abort_check() — if callable returns True mid-stream, cancels gracefully.
-        model_tier    — "light" (fast/cheap), "heavy" (smart), or "auto" (primary chain)
+        model_tier    — "light", "heavy", "coder", or "auto"
         """
         # Reset to primary each turn, then move to tier start if specified
         self._api.reset()
-        if model_tier in ("light", "heavy"):
+        if model_tier in ("light", "heavy", "coder"):
             self._api.set_tier(model_tier)
 
         self.history.add_user(user_input)
@@ -48,6 +91,7 @@ class Orchestrator:
         loop_messages = list(messages)
         tools         = self.registry.get_definitions()
         full_response = ""
+        allow_tools   = True
 
         for _round in range(10):
             # ── Abort checkpoint ─────────────────────────────────────────────
@@ -67,36 +111,51 @@ class Orchestrator:
                     self.history.add_assistant(msg)
                     return
                 try:
-                    stream = client.chat.completions.create(
-                        model=self._api.current_model,
-                        messages=loop_messages,
-                        tools=tools,
-                        tool_choice="auto",
-                        temperature=0.7,
-                        max_tokens=900,
-                        stream=True,
-                        stream_options={"include_usage": True},
-                    )
+                    max_tokens = _MAX_TOKENS_BY_TIER.get(self._api.current_tier, 400)
+                    request_kwargs = {
+                        "model": self._api.current_model,
+                        "messages": loop_messages,
+                        "temperature": 0.7,
+                        "max_tokens": max_tokens,
+                        "stream": True,
+                        "stream_options": {"include_usage": True},
+                    }
+                    if allow_tools:
+                        request_kwargs["tools"] = tools
+                        request_kwargs["tool_choice"] = "auto"
+                    stream = client.chat.completions.create(**request_kwargs)
                 except Exception as e:
                     last_err = f"{type(e).__name__}: {e}"
                     log_error("orchestrator", last_err)
-                    # 402 = insufficient credits — give a clear message immediately
                     err_str = str(e)
-                    if "402" in err_str and "credits" in err_str.lower():
+                    if allow_tools and (_is_tool_use_unsupported(err_str) or _should_retry_without_tools(err_str)):
+                        allow_tools = False
+                        time.sleep(0.2)
+                        continue
+                    retryable_quota = _is_quota_or_rate_limit(err_str)
+                    if self._api.try_next():
+                        allow_tools = True
+                        time.sleep(0.5)
+                        continue
+
+                    if retryable_quota and ("402" in err_str or "credits" in err_str.lower()):
                         msg = (
-                            "⚠  OpenRouter credit balance too low.\n"
-                            "   Top up at: https://openrouter.ai/settings/credits\n"
-                            "   Or switch to a free model: /add-api openrouter <new-key>"
+                            "⚠  All configured model keys are out of credits or quota.\n"
+                            "   Add another key with /add-api or wait for limits to reset."
                         )
-                        yield msg
-                        self.history.add_assistant(msg)
-                        return
-                    if not self._api.try_next():
+                    elif retryable_quota:
+                        msg = (
+                            "⚠  All configured model keys are rate-limited right now.\n"
+                            "   Jarvis tried the full key/model pool and ran out of fallback options."
+                        )
+                    else:
                         msg = f"API error — {last_err}"
                         yield msg
                         self.history.add_assistant(msg)
                         return
-                    time.sleep(0.5)
+                    yield msg
+                    self.history.add_assistant(msg)
+                    return
 
             # ── Accumulate streaming chunks ───────────────────────────────────
             tool_calls_acc: dict[int, dict] = {}
@@ -175,6 +234,7 @@ class Orchestrator:
                 })
 
             full_response = ""
+            allow_tools = True
 
         yield "Done, sir."
         self.history.add_assistant("Done, sir.")

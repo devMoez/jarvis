@@ -8,14 +8,37 @@ from core.profile import get_profile_prompt
 
 _SESSION_FILE     = os.path.join(os.path.dirname(__file__), "..", "data", "session.json")
 _CUSTOM_MODES_FILE = Path(__file__).parent.parent / "data" / "custom_modes.json"
+_ACTIVE_MODE_FILE = Path(__file__).parent.parent / "data" / "active_mode.json"
+
+
+def _load_active_mode() -> str | None:
+    try:
+        if _ACTIVE_MODE_FILE.exists():
+            data = json.loads(_ACTIVE_MODE_FILE.read_text(encoding="utf-8"))
+            name = data.get("active_mode")
+            if isinstance(name, str) and name.strip():
+                return name.lower().strip()
+    except Exception:
+        pass
+    return None
+
+
+def _save_active_mode(name: str | None) -> None:
+    try:
+        _ACTIVE_MODE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"active_mode": name.lower().strip() if name else None}
+        _ACTIVE_MODE_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 # ── Active mode (persona) ─────────────────────────────────────────────────────
-_active_mode: str | None = None
+_active_mode: str | None = _load_active_mode()
 
 
 def set_mode(name: str | None) -> None:
     global _active_mode
     _active_mode = name.lower().strip() if name else None
+    _save_active_mode(_active_mode)
 
 
 def get_mode() -> str | None:

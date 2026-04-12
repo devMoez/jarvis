@@ -1,0 +1,17 @@
+{
+  "tokens": {
+    "2026-04-12": {
+      "prompt": 0,
+      "completion": 0
+    }
+  },
+  "requests": {
+    "2026-04-12": 6
+  },
+  "model_usage": {
+    "2026-04-12": {
+      "@google/gemma-4-26b-a4b-it": 5,
+      "@moonshotai/kimi-k2.5": 1
+    }
+  }
+}

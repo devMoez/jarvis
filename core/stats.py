@@ -19,13 +19,18 @@ def _save(data: dict) -> None:
     _FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def record(prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+def record(prompt_tokens: int = 0, completion_tokens: int = 0, model: str = None) -> None:
     today = datetime.date.today().isoformat()
     data  = _load()
     t = data["tokens"].setdefault(today, {"prompt": 0, "completion": 0})
     t["prompt"]     += prompt_tokens
     t["completion"] += completion_tokens
     data["requests"][today] = data["requests"].get(today, 0) + 1
+    
+    if model:
+        m_stats = data.setdefault("model_usage", {}).setdefault(today, {})
+        m_stats[model] = m_stats.get(model, 0) + 1
+        
     _save(data)
 
 
