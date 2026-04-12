@@ -1,1 +1,5 @@
-{"active_model": "@google/gemma-4-26b-a4b-it", "last_update": 1775956299.6024325}
+{
+  "provider": "cloudflare",
+  "model": "@cf/google/gemma-4-26b-a4b-it",
+  "tier": "light"
+}

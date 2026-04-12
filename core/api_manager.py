@@ -1,38 +1,32 @@
 """
-OpenRouter-only API manager with stable task routing.
-
-Behavior:
-  - One fixed router model decides which lane to use.
-  - Each lane uses one fixed response model.
-  - Jarvis only rotates API keys, not response models, during a turn.
+Cloudflare-only API manager with stable task routing.
 """
 import os
-import re
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import openai
 
 _ENV_FILE = Path(__file__).parent.parent / ".env"
-_OR_ENV_BASE = "OPENROUTER_API_KEY"
-_OR_BASE = "https://openrouter.ai/api/v1"
-_OR_HEADERS = {
-    "HTTP-Referer": "https://github.com/moez-f/jarvis-ai",
-    "X-Title": "Jarvis AI Assistant",
-}
+_CF_ENV_ACCOUNT = "CLOUDFLARE_ACCOUNT_ID"
+_CF_ENV_EMAIL = "CLOUDFLARE_AUTH_EMAIL"
+_CF_ENV_KEY = "CLOUDFLARE_GLOBAL_API_KEY"
+_CF_BASE_TMPL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
 
-_ROUTER_MODEL = "google/gemini-2.5-pro-exp:free"
+_CF_ROUTER_MODEL = "@cf/google/gemma-4-26b-a4b-it"
 _TIER_MODELS: dict[str, str] = {
-    "light": "google/gemini-2.5-pro-exp:free",
-    "heavy": "google/gemini-2.5-pro-exp:free",
-    "coder": "google/gemini-2.5-pro-exp:free",
+    "light": "@cf/google/gemma-4-26b-a4b-it",
+    "heavy": "@cf/nvidia/nemotron-3-120b-a12b",
+    "coder": "@cf/moonshotai/kimi-k2.5",
 }
 _DEFAULT_TIER = "light"
 
 _ALIASES = {
-    "or": "openrouter",
-    "orouter": "openrouter",
-    "openrouter": "openrouter",
+    "cf": "cloudflare",
+    "cloudflare": "cloudflare",
+    "cloudflare-account": "cloudflare-account",
+    "cloudflare-email": "cloudflare-email",
+    "cloudflare-key": "cloudflare-key",
 }
 
 _CODER_KEYWORDS = (
@@ -41,40 +35,15 @@ _CODER_KEYWORDS = (
     "automation", "automate", "workflow", "n8n", "api", "json", "yaml",
     "python", "javascript", "typescript", "powershell", "terminal", "command",
     "repo", "repository", "playwright", "test", "tests", "open", "launch",
-    "run", "start", "execute", "app", "application",
+    "run", "start", "execute", "app", "application", "browser", "file",
+    "system command", "scheduler",
 )
 _HEAVY_KEYWORDS = (
-    "research", "analyze", "analyse", "plan", "design", "compare", "review",
-    "investigate", "study", "evaluate", "report", "essay", "letter",
-    "document", "translate", "summarize", "difference between", "how does",
-    "how do i", "help me understand", "walk me through", "what is the",
-    "why does", "why is", "can you explain", "tell me about", "search",
-    "look up", "latest", "browse", "website", "web", "scrape", "news",
+    "research", "deep research", "analyze", "analyse", "plan", "design",
+    "compare", "review", "investigate", "study", "evaluate", "report",
+    "essay", "letter", "document", "translate", "summarize", "academic",
+    "paper", "proposal", "cv", "long-form",
 )
-
-
-def _slot_env_key(slot: int) -> str:
-    return _OR_ENV_BASE if slot <= 1 else f"{_OR_ENV_BASE}_{slot}"
-
-
-def _or_env_names() -> list[str]:
-    slots: dict[int, str] = {1: _OR_ENV_BASE}
-    for env_name in os.environ:
-        if env_name == _OR_ENV_BASE:
-            continue
-        match = re.fullmatch(rf"{_OR_ENV_BASE}_(\d+)", env_name)
-        if match:
-            slots[int(match.group(1))] = env_name
-    return [slots[idx] for idx in sorted(slots)]
-
-
-def _or_keys() -> list[str]:
-    keys: list[str] = []
-    for env_name in _or_env_names():
-        raw = os.environ.get(env_name, "").strip()
-        if raw and raw not in keys:
-            keys.append(raw)
-    return keys
 
 
 def _load_env_lines() -> list[str]:
@@ -102,41 +71,34 @@ def _update_env_file(env_key: str, value: str) -> None:
     _write_env_lines(lines)
 
 
-def _rewrite_prefixed_env(prefix: str, entries: dict[str, str]) -> None:
-    remaining = dict(entries)
-    kept: list[str] = []
-
-    for line in _load_env_lines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            kept.append(line)
-            continue
-
-        env_key = line.split("=", 1)[0].strip()
-        if env_key == prefix or env_key.startswith(f"{prefix}_"):
-            if env_key in remaining:
-                kept.append(f"{env_key}={remaining.pop(env_key)}\n")
-            continue
-
-        kept.append(line)
-
-    for env_key, value in remaining.items():
-        kept.append(f"{env_key}={value}\n")
-
-    _write_env_lines(kept)
-
-
 def _preview(raw: str) -> str:
     return f"{raw[:8]}...{raw[-4:]}" if len(raw) > 12 else ("***" if raw else "")
 
 
-def _make_client(key: str) -> Optional[openai.OpenAI]:
+def _cf_creds() -> Optional[tuple[str, str, str]]:
+    account = os.environ.get(_CF_ENV_ACCOUNT, "").strip()
+    email = os.environ.get(_CF_ENV_EMAIL, "").strip()
+    key = os.environ.get(_CF_ENV_KEY, "").strip()
+    if account and email and key:
+        return account, email, key
+    return None
+
+
+def _cf_headers(email: str, key: str) -> dict:
+    return {
+        "X-Auth-Email": email,
+        "X-Auth-Key": key,
+        "Content-Type": "application/json",
+    }
+
+
+def _make_client(key: str, base_url: str, headers: dict) -> Optional[openai.OpenAI]:
     if not key:
         return None
     return openai.OpenAI(
         api_key=key,
-        base_url=_OR_BASE,
-        default_headers=_OR_HEADERS,
+        base_url=base_url,
+        default_headers=headers,
         timeout=90.0,
     )
 
@@ -150,27 +112,8 @@ def _heuristic_route(text: str) -> str:
     return "light"
 
 
-def configure_openrouter_keys(keys: Iterable[str]) -> tuple[bool, str]:
-    clean_keys: list[str] = []
-    for raw in keys:
-        key = raw.strip()
-        if key and key not in clean_keys:
-            clean_keys.append(key)
-
-    if not clean_keys:
-        return False, "No OpenRouter keys provided."
-
-    updates = {_slot_env_key(idx): key for idx, key in enumerate(clean_keys, start=1)}
-    for env_key, key in updates.items():
-        os.environ[env_key] = key
-
-    for env_name in list(os.environ):
-        if env_name == _OR_ENV_BASE or env_name.startswith(f"{_OR_ENV_BASE}_"):
-            if env_name not in updates:
-                os.environ.pop(env_name, None)
-
-    _rewrite_prefixed_env(_OR_ENV_BASE, updates)
-    return True, f"Loaded {len(clean_keys)} OpenRouter key(s)."
+def configure_openrouter_keys(_keys) -> tuple[bool, str]:
+    return False, "OpenRouter is disabled. Jarvis uses Cloudflare only."
 
 
 def add_key(provider_input: str, key: str) -> tuple[bool, str]:
@@ -180,44 +123,62 @@ def add_key(provider_input: str, key: str) -> tuple[bool, str]:
     if not clean_key:
         return False, "API key cannot be empty."
 
-    if normalized == "openrouter":
-        os.environ[_OR_ENV_BASE] = clean_key
-        _update_env_file(_OR_ENV_BASE, clean_key)
-        return True, "OpenRouter key saved to slot 1."
+    if normalized == "cloudflare-account":
+        os.environ[_CF_ENV_ACCOUNT] = clean_key
+        _update_env_file(_CF_ENV_ACCOUNT, clean_key)
+        return True, "Cloudflare account id saved."
 
-    slot_match = re.fullmatch(r"openrouter[_-]?(\d+)", provider)
-    if slot_match:
-        slot = max(1, int(slot_match.group(1)))
-        env_key = _slot_env_key(slot)
-        os.environ[env_key] = clean_key
-        _update_env_file(env_key, clean_key)
-        return True, f"OpenRouter key saved to slot {slot}."
+    if normalized == "cloudflare-email":
+        os.environ[_CF_ENV_EMAIL] = clean_key
+        _update_env_file(_CF_ENV_EMAIL, clean_key)
+        return True, "Cloudflare auth email saved."
 
-    return False, f"Unknown provider '{provider_input}'. Use: openrouter, openrouter2, openrouter3..."
+    if normalized == "cloudflare-key":
+        os.environ[_CF_ENV_KEY] = clean_key
+        _update_env_file(_CF_ENV_KEY, clean_key)
+        return True, "Cloudflare global API key saved."
+
+    if normalized == "cloudflare":
+        parts = [p.strip() for p in clean_key.split(",")]
+        if len(parts) == 3 and all(parts):
+            account, email, api_key = parts
+            os.environ[_CF_ENV_ACCOUNT] = account
+            os.environ[_CF_ENV_EMAIL] = email
+            os.environ[_CF_ENV_KEY] = api_key
+            _update_env_file(_CF_ENV_ACCOUNT, account)
+            _update_env_file(_CF_ENV_EMAIL, email)
+            _update_env_file(_CF_ENV_KEY, api_key)
+            return True, "Cloudflare credentials saved."
+        return False, "Use: /add-api cloudflare <account_id,email,global_api_key>"
+
+    return False, (
+        f"Unknown provider '{provider_input}'. "
+        "Use: cloudflare-account, cloudflare-email, cloudflare-key, or cloudflare"
+    )
 
 
 def list_providers() -> list[dict]:
-    or_keys = _or_keys()
+    cf = _cf_creds()
     return [
         {
-            "name": "openrouter",
-            "display": "OpenRouter",
-            "configured": bool(or_keys),
-            "preview": _preview(or_keys[0] if or_keys else ""),
-            "models": [_ROUTER_MODEL, *_TIER_MODELS.values()],
-            "key_count": len(or_keys),
-            "extra": f"{len(or_keys)} key(s) in pool" if or_keys else "pool empty",
+            "name": "cloudflare",
+            "display": "Cloudflare AI",
+            "configured": bool(cf),
+            "preview": _preview(cf[2] if cf else ""),
+            "models": list(_TIER_MODELS.values()),
+            "key_count": 1 if cf else 0,
+            "extra": "primary" if cf else "missing account/email/key",
         }
     ]
 
 
 def has_configured_provider() -> bool:
-    return bool(_or_keys())
+    return bool(_cf_creds())
 
 
 def describe_tiers() -> dict[str, str]:
     return {
-        "router": _ROUTER_MODEL,
+        "router": _CF_ROUTER_MODEL,
         "light": _TIER_MODELS["light"],
         "heavy": _TIER_MODELS["heavy"],
         "coder": _TIER_MODELS["coder"],
@@ -225,28 +186,31 @@ def describe_tiers() -> dict[str, str]:
 
 
 class APIManager:
-    """
-    Stable OpenRouter-only manager.
-
-    The selected tier stays fixed for a request. Only API keys rotate.
-    """
+    """Stable Cloudflare-only manager."""
 
     def __init__(self):
         self._tier: str = _DEFAULT_TIER
         self._chain: list[tuple[str, str, str, dict, str]] = []
         self._index: int = 0
-        self._or_key_idx: int = 0
         self._build()
 
     def _build(self) -> None:
-        or_keys = _or_keys()
+        cf = _cf_creds()
         chain: list[tuple[str, str, str, dict, str]] = []
-        if or_keys:
+        if cf:
+            account, email, key = cf
             model = _TIER_MODELS.get(self._tier, _TIER_MODELS[_DEFAULT_TIER])
-            chain.append(("openrouter", model, _OR_BASE, _OR_HEADERS, or_keys[0]))
+            chain.append(
+                (
+                    "cloudflare",
+                    model,
+                    _CF_BASE_TMPL.format(account_id=account),
+                    _cf_headers(email, key),
+                    key,
+                )
+            )
         self._chain = chain
         self._index = 0
-        self._or_key_idx = 0
 
     def rebuild(self) -> None:
         self._build()
@@ -258,11 +222,19 @@ class APIManager:
 
     def reset(self) -> None:
         self._index = 0
-        self._or_key_idx = 0
 
     def route_task(self, text: str) -> str:
-        keys = _or_keys()
-        if not keys:
+        cf = _cf_creds()
+        if not cf:
+            return _heuristic_route(text)
+
+        account, email, key = cf
+        client = _make_client(
+            key=key,
+            base_url=_CF_BASE_TMPL.format(account_id=account),
+            headers=_cf_headers(email, key),
+        )
+        if client is None:
             return _heuristic_route(text)
 
         messages = [
@@ -270,33 +242,28 @@ class APIManager:
                 "role": "system",
                 "content": (
                     "Classify the user request into exactly one label: light, heavy, or coder.\n"
-                    "light = normal chat, simple questions, casual greetings, jokes.\n"
-                    "heavy = deep research, planning, complex analysis, long documents.\n"
-                    "coder = technical tasks, code, scripts, automation, opening/launching apps, system commands, tools.\n"
+                    "light = normal chat, simple questions, quick summaries, humanized responses.\n"
+                    "heavy = deep research, academic writing, long-form documents and analysis.\n"
+                    "coder = tool calling, browser automation, file ops, scheduler/n8n, system commands, multi-step execution.\n"
                     "Reply with only one word: light, heavy, or coder."
                 ),
             },
             {"role": "user", "content": text[:4000]},
         ]
-
-        for key in keys:
-            client = _make_client(key)
-            if client is None:
-                continue
-            try:
-                resp = client.chat.completions.create(
-                    model=_ROUTER_MODEL,
-                    messages=messages,
-                    max_tokens=4,
-                    temperature=0,
-                    stream=False,
-                )
-                content = (resp.choices[0].message.content or "").strip().lower()
-                for tier in ("light", "heavy", "coder"):
-                    if tier in content:
-                        return tier
-            except Exception:
-                continue
+        try:
+            resp = client.chat.completions.create(
+                model=_CF_ROUTER_MODEL,
+                messages=messages,
+                max_tokens=4,
+                temperature=0,
+                stream=False,
+            )
+            content = (resp.choices[0].message.content or "").strip().lower()
+            for tier in ("light", "heavy", "coder"):
+                if tier in content:
+                    return tier
+        except Exception:
+            pass
 
         return _heuristic_route(text)
 
@@ -328,21 +295,10 @@ class APIManager:
         current = self.current
         if not current:
             return None
-        return _make_client(current[4])
+        return _make_client(key=current[4], base_url=current[2], headers=current[3])
 
     def try_next(self) -> bool:
-        if not self._chain:
-            return False
-
-        or_keys = _or_keys()
-        self._or_key_idx += 1
-        if self._or_key_idx >= len(or_keys):
-            self._or_key_idx = 0
-            return False
-
-        provider, model, base_url, headers, _old_key = self._chain[0]
-        self._chain[0] = (provider, model, base_url, headers, or_keys[self._or_key_idx])
-        return True
+        return False
 
     def __len__(self) -> int:
         return len(self._chain)
