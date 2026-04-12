@@ -266,6 +266,66 @@ TOOL_STATUS = {
     "search_papers":       "searching papers...",
 }
 
+_TASK_CONTEXT = {
+    "run_command": "shell",
+    "open_app": "shell",
+    "open_url": "browser",
+    "scrape_page": "browser",
+    "browser_open_visible": "browser",
+    "browser_login": "notepad",
+    "browser_with_session": "browser",
+    "read_file": "filesystem",
+    "write_file": "filesystem",
+    "move_file": "filesystem",
+    "copy_file": "filesystem",
+    "delete_file": "filesystem",
+    "list_directory": "filesystem",
+    "search_files": "grep",
+}
+
+_TASK_VERB_PRESENT = {
+    "open": "Opening",
+    "launch": "Opening",
+    "run": "Running",
+    "read": "Reading",
+    "write": "Saving",
+    "delete": "Deleting",
+    "move": "Moving",
+    "copy": "Copying",
+    "list": "Listing",
+    "search": "Searching",
+    "fetch": "Fetching",
+    "install": "Installing",
+    "get": "Getting",
+}
+
+_TASK_VERB_PAST = {
+    "Opening": "Opened",
+    "Running": "Ran",
+    "Reading": "Read",
+    "Saving": "Saved",
+    "Deleting": "Deleted",
+    "Moving": "Moved",
+    "Copying": "Copied",
+    "Listing": "Listed",
+    "Searching": "Searched",
+    "Fetching": "Fetched",
+    "Installing": "Installed",
+    "Getting": "Got",
+}
+
+
+def _task_title(tool_name: str) -> tuple[str, str]:
+    status = TOOL_STATUS.get(tool_name, "working...")
+    first = status.split(" ", 1)[0].lower().strip(".")
+    verb = _TASK_VERB_PRESENT.get(first, "Running")
+    return f"{verb} {tool_name.replace('_', ' ')}", _TASK_CONTEXT.get(tool_name, "task")
+
+
+def _task_done_title(running_title: str) -> str:
+    head, tail = (running_title.split(" ", 1) + [""])[:2]
+    return f"{_TASK_VERB_PAST.get(head, 'Done')} {tail}".strip()
+
 # Colors cycled by the spinner for status labels
 _STATUS_COLORS = [AMBER, GOLD, CYAN, VIOLET, GREEN, PINK, TEAL, CORAL]
 _COLOR_CHANGE_TICKS = 15  # ~1.2 s at 0.08 s/frame
@@ -937,13 +997,35 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
         model_tier=model_tier,
     )
 
+    active_task: dict | None = None
+
+    def _close_task(state: str, detail: str = "") -> None:
+        nonlocal active_task
+        if not active_task:
+            return
+        title = active_task["title"]
+        context = active_task["context"]
+        if state == "done":
+            _raw(f"  \033[38;5;40m●{RESET} \033[38;5;151m{_task_done_title(title)} ({context}){RESET}\n")
+            _raw(f"    {DIM}└─ completed{RESET}\n")
+        else:
+            _raw(f"  \033[38;5;196m●{RESET} \033[38;5;210m{title} ({context}){RESET}\n")
+            _raw(f"    \033[38;5;210m└─ {sanitize(detail) if detail else 'failed'}{RESET}\n")
+        active_task = None
+
     for token in gen:
         if abort_check and abort_check():
+            _close_task("failed", "cancelled")
             break
 
         if token.startswith(TOOL_EVENT_PREFIX):
+            _close_task("done")
             tool_name = token[len(TOOL_EVENT_PREFIX):]
             status_ref[0] = TOOL_STATUS.get(tool_name, "working...")
+            title, context = _task_title(tool_name)
+            _raw(f"  {AMBER}●{RESET} {AMBER}{title} ({context}){RESET}\n")
+            _raw(f"    {DIM}└─ {TOOL_STATUS.get(tool_name, 'working...')}{RESET}\n")
+            active_task = {"name": tool_name, "title": title, "context": context}
             continue
 
         if not header_printed:
@@ -952,19 +1034,24 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
             _stream[0] = ""
             header_printed = True
 
+        if "API error" in token:
+            _close_task("failed", token.strip())
+
         full += token
-        _stream[0] = full
+        _stream[0] = "  " + full.replace("\n", "\n  ")
         _render()
 
     if not stop_spin.is_set():
         stop_spin.set()
         spin_thread.join()
 
+    _close_task("done")
+
     # Move streaming text to permanent output, clear the live buffer
     if header_printed and full:
         with _out_lock:
             for ln in full.split('\n'):
-                _out_buf.append(ln)
+                _out_buf.append(("  " + ln) if ln else "")
             _out_buf.append("")          # blank spacer after response
         _stream[0] = ""
     else:
@@ -2324,8 +2411,12 @@ def main_loop():
 
         # Pin to bottom so echoed input + response appear just above the input bar
         _scroll[0] = 0
-        # Echo the input into the output area
-        _raw(f" {CYAN}○{RESET} {WHITE}{sanitize(raw)}{RESET}\n")
+        # Echo the input into the output area (aligned, blue chevron, subtle highlight)
+        _raw(
+            "  "
+            f"\033[38;5;75m>{RESET} "
+            f"\033[48;5;236m\033[38;5;75m▌▏{RESET}\033[48;5;236m {WHITE}{sanitize(raw)} {RESET}\n"
+        )
 
         if raw.lower().startswith("/first "):
             payload = raw[7:].strip()
