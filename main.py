@@ -44,9 +44,23 @@ from version import VERSION, API_PROVIDER, AUTHOR
 console = Console(force_terminal=True, color_system="256", highlight=False)
 
 _has_cf = bool(
-    os.getenv("CLOUDFLARE_ACCOUNT_ID")
-    and os.getenv("CLOUDFLARE_AUTH_EMAIL")
-    and os.getenv("CLOUDFLARE_GLOBAL_API_KEY")
+    (
+        os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        and os.getenv("CLOUDFLARE_AUTH_EMAIL")
+        and os.getenv("CLOUDFLARE_GLOBAL_API_KEY")
+    )
+    or (
+        os.getenv("CLOUDFLARE_ACCOUNT_ID")
+        and os.getenv("CLOUDFLARE_API_TOKEN")
+    )
+    or (
+        os.getenv("CLOUDFLARE_ACCOUNT_ID_2")
+        and os.getenv("CLOUDFLARE_API_TOKEN_2")
+    )
+    or (
+        os.getenv("CLOUDFLARE_ACCOUNT_ID_3")
+        and os.getenv("CLOUDFLARE_API_TOKEN_3")
+    )
 )
 if not _has_cf and not os.getenv("OPENROUTER_API_KEY"):
     console.print(
@@ -285,24 +299,40 @@ _TASK_CONTEXT = {
 
 _TASK_VERB_PRESENT = {
     "open": "Opening",
+    "opening": "Opening",
     "launch": "Opening",
+    "launching": "Opening",
     "run": "Running",
+    "running": "Running",
     "read": "Reading",
-    "write": "Saving",
+    "reading": "Reading",
+    "write": "Writing",
+    "writing": "Writing",
+    "save": "Saving",
+    "saving": "Saving",
     "delete": "Deleting",
+    "deleting": "Deleting",
     "move": "Moving",
+    "moving": "Moving",
     "copy": "Copying",
+    "copying": "Copying",
     "list": "Listing",
+    "listing": "Listing",
     "search": "Searching",
+    "searching": "Searching",
     "fetch": "Fetching",
+    "fetching": "Fetching",
     "install": "Installing",
+    "installing": "Installing",
     "get": "Getting",
+    "getting": "Getting",
 }
 
 _TASK_VERB_PAST = {
     "Opening": "Opened",
     "Running": "Ran",
     "Reading": "Read",
+    "Writing": "Written",
     "Saving": "Saved",
     "Deleting": "Deleted",
     "Moving": "Moved",
@@ -325,6 +355,41 @@ def _task_title(tool_name: str) -> tuple[str, str]:
 def _task_done_title(running_title: str) -> str:
     head, tail = (running_title.split(" ", 1) + [""])[:2]
     return f"{_TASK_VERB_PAST.get(head, 'Done')} {tail}".strip()
+
+
+_TASK_RUN_STEP = {
+    "open_app": "Start-Process requested",
+    "run_command": "Executing shell command",
+    "read_file": "Reading target file",
+    "write_file": "Writing output file",
+    "move_file": "Moving file",
+    "copy_file": "Copying file",
+    "delete_file": "Deleting file",
+    "list_directory": "Listing directory entries",
+    "search_files": "Scanning files for matches",
+    "open_url": "Opening destination URL",
+    "scrape_page": "Fetching page content",
+    "browser_open_visible": "Launching visible browser",
+    "browser_login": "Opening login session",
+    "browser_with_session": "Opening saved session",
+}
+
+_TASK_DONE_STEP = {
+    "open_app": "Window opened",
+    "run_command": "Command finished",
+    "read_file": "Read complete",
+    "write_file": "File saved",
+    "move_file": "Move complete",
+    "copy_file": "Copy complete",
+    "delete_file": "Delete complete",
+    "list_directory": "Directory listed",
+    "search_files": "Search complete",
+    "open_url": "URL opened",
+    "scrape_page": "Content captured",
+    "browser_open_visible": "Browser opened",
+    "browser_login": "Login window ready",
+    "browser_with_session": "Session opened",
+}
 
 # Colors cycled by the spinner for status labels
 _STATUS_COLORS = [AMBER, GOLD, CYAN, VIOLET, GREEN, PINK, TEAL, CORAL]
@@ -999,18 +1064,41 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
 
     active_task: dict | None = None
 
+    def _set_task_lines(title_line: str, sub_line: str) -> None:
+        nonlocal active_task
+        if not active_task:
+            return
+        idx = active_task["idx"]
+        with _out_lock:
+            if idx < len(_out_buf):
+                _out_buf[idx] = title_line
+            if idx + 1 < len(_out_buf):
+                _out_buf[idx + 1] = sub_line
+        _render(force=True)
+
     def _close_task(state: str, detail: str = "") -> None:
         nonlocal active_task
         if not active_task:
             return
+        tool_name = active_task["name"]
         title = active_task["title"]
         context = active_task["context"]
         if state == "done":
-            _raw(f"  \033[38;5;40m●{RESET} \033[38;5;151m{_task_done_title(title)} ({context}){RESET}\n")
-            _raw(f"    {DIM}└─ completed{RESET}\n")
+            done_step = sanitize(detail) if detail else "completed"
+            _set_task_lines(
+                f"  \033[38;5;40m●{RESET} \033[38;5;151m{_task_done_title(title)} ({context}){RESET}",
+                f"    \033[38;5;151m└─ {done_step}{RESET}",
+            )
         else:
-            _raw(f"  \033[38;5;196m●{RESET} \033[38;5;210m{title} ({context}){RESET}\n")
-            _raw(f"    \033[38;5;210m└─ {sanitize(detail) if detail else 'failed'}{RESET}\n")
+            err = sanitize(detail) if detail else "failed"
+            fail_title = title
+            if " " in title:
+                _, rest = title.split(" ", 1)
+                fail_title = f"Failed {rest}"
+            _set_task_lines(
+                f"  \033[38;5;196m●{RESET} \033[38;5;210m{fail_title} ({context}){RESET}",
+                f"    \033[38;5;210m└─ {err}{RESET}",
+            )
         active_task = None
 
     for token in gen:
@@ -1023,9 +1111,17 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
             tool_name = token[len(TOOL_EVENT_PREFIX):]
             status_ref[0] = TOOL_STATUS.get(tool_name, "working...")
             title, context = _task_title(tool_name)
-            _raw(f"  {AMBER}●{RESET} {AMBER}{title} ({context}){RESET}\n")
-            _raw(f"    {DIM}└─ {TOOL_STATUS.get(tool_name, 'working...')}{RESET}\n")
-            active_task = {"name": tool_name, "title": title, "context": context}
+            run_step = _TASK_RUN_STEP.get(tool_name, TOOL_STATUS.get(tool_name, "working..."))
+            with _out_lock:
+                if _out_acc[0]:
+                    _out_buf.append(_out_acc[0])
+                    _out_acc[0] = ""
+                idx = len(_out_buf)
+                _out_buf.append(f"  {AMBER}●{RESET} {AMBER}{title} ({context}){RESET}")
+                _out_buf.append(f"    {DIM}└─ {sanitize(run_step)}{RESET}")
+            _scroll[0] = 0
+            _render(force=True)
+            active_task = {"name": tool_name, "title": title, "context": context, "idx": idx}
             continue
 
         if not header_printed:
@@ -2411,11 +2507,17 @@ def main_loop():
 
         # Pin to bottom so echoed input + response appear just above the input bar
         _scroll[0] = 0
-        # Echo the input into the output area (aligned, blue chevron, subtle highlight)
+        # Echo the input into the output area (blue chevron + full-row subtle highlight)
+        w = max(_term.width or 80, 40)
+        msg = sanitize(raw)
+        plain = f"  > {msg} "
+        if len(plain) > w:
+            msg = msg[: max(0, w - len("  >  "))]
+            plain = f"  > {msg} "
+        pad = " " * max(0, w - len(plain))
         _raw(
-            "  "
-            f"\033[38;5;75m>{RESET} "
-            f"\033[48;5;236m\033[38;5;75m▌▏{RESET}\033[48;5;236m {WHITE}{sanitize(raw)} {RESET}\n"
+            f"\033[48;5;236m  \033[38;5;75m>{RESET}"
+            f"\033[48;5;236m {WHITE}{msg}{pad} {RESET}\n"
         )
 
         if raw.lower().startswith("/first "):
@@ -2598,28 +2700,26 @@ def _test_openrouter_connection() -> None:
     """Quick connectivity check on startup — prints result, never blocks."""
     global _cloudflare_ok
     try:
-        import openai as _oai
-        account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
-        email = os.getenv("CLOUDFLARE_AUTH_EMAIL", "").strip()
-        key = os.getenv("CLOUDFLARE_GLOBAL_API_KEY", "").strip()
-        if not (account and email and key):
-            _cloudflare_ok = False
-            return
-        client = _oai.OpenAI(
-            api_key=key,
-            base_url=f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1",
-            default_headers={
-                "X-Auth-Email": email,
-                "X-Auth-Key": key,
-                "Content-Type": "application/json",
-            },
-        )
-        client.chat.completions.create(
-            model="@cf/google/gemma-4-26b-a4b-it",
-            messages=[{"role": "user", "content": "say ok"}],
-            max_tokens=5,
-        )
-        _cloudflare_ok = True
+        orchestrator._api.rebuild()
+        orchestrator._api.reset()
+        _cloudflare_ok = False
+        attempts = max(1, orchestrator._api.chain_length)
+        for _ in range(attempts):
+            client = orchestrator._api.get_client()
+            model = orchestrator._api.current_model
+            if client and model and model != "none":
+                try:
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": "say ok"}],
+                        max_tokens=5,
+                    )
+                    _cloudflare_ok = True
+                    return
+                except Exception:
+                    pass
+            if not orchestrator._api.try_next():
+                break
     except Exception:
         _cloudflare_ok = False
 

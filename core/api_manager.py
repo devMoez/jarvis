@@ -11,6 +11,11 @@ _ENV_FILE = Path(__file__).parent.parent / ".env"
 _CF_ENV_ACCOUNT = "CLOUDFLARE_ACCOUNT_ID"
 _CF_ENV_EMAIL = "CLOUDFLARE_AUTH_EMAIL"
 _CF_ENV_KEY = "CLOUDFLARE_GLOBAL_API_KEY"
+_CF_ENV_TOKEN = "CLOUDFLARE_API_TOKEN"
+_CF_ENV_ACCOUNT_2 = "CLOUDFLARE_ACCOUNT_ID_2"
+_CF_ENV_TOKEN_2 = "CLOUDFLARE_API_TOKEN_2"
+_CF_ENV_ACCOUNT_3 = "CLOUDFLARE_ACCOUNT_ID_3"
+_CF_ENV_TOKEN_3 = "CLOUDFLARE_API_TOKEN_3"
 _CF_BASE_TMPL = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1"
 
 _CF_ROUTER_MODEL = "@cf/google/gemma-4-26b-a4b-it"
@@ -27,6 +32,11 @@ _ALIASES = {
     "cloudflare-account": "cloudflare-account",
     "cloudflare-email": "cloudflare-email",
     "cloudflare-key": "cloudflare-key",
+    "cloudflare-token": "cloudflare-token",
+    "cloudflare-account-2": "cloudflare-account-2",
+    "cloudflare-token-2": "cloudflare-token-2",
+    "cloudflare-account-3": "cloudflare-account-3",
+    "cloudflare-token-3": "cloudflare-token-3",
 }
 
 _CODER_KEYWORDS = (
@@ -75,7 +85,7 @@ def _preview(raw: str) -> str:
     return f"{raw[:8]}...{raw[-4:]}" if len(raw) > 12 else ("***" if raw else "")
 
 
-def _cf_creds() -> Optional[tuple[str, str, str]]:
+def _cf_global_creds() -> Optional[tuple[str, str, str]]:
     account = os.environ.get(_CF_ENV_ACCOUNT, "").strip()
     email = os.environ.get(_CF_ENV_EMAIL, "").strip()
     key = os.environ.get(_CF_ENV_KEY, "").strip()
@@ -84,12 +94,38 @@ def _cf_creds() -> Optional[tuple[str, str, str]]:
     return None
 
 
-def _cf_headers(email: str, key: str) -> dict:
+def _cf_headers_global(email: str, key: str) -> dict:
     return {
         "X-Auth-Email": email,
         "X-Auth-Key": key,
         "Content-Type": "application/json",
     }
+
+
+def _cf_headers_token(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+
+def _cf_token_creds() -> list[tuple[str, str]]:
+    creds: list[tuple[str, str]] = []
+    account_1 = os.environ.get(_CF_ENV_ACCOUNT, "").strip()
+    token_1 = os.environ.get(_CF_ENV_TOKEN, "").strip()
+    if account_1 and token_1:
+        creds.append((account_1, token_1))
+
+    account_2 = os.environ.get(_CF_ENV_ACCOUNT_2, "").strip()
+    token_2 = os.environ.get(_CF_ENV_TOKEN_2, "").strip()
+    if account_2 and token_2:
+        creds.append((account_2, token_2))
+
+    account_3 = os.environ.get(_CF_ENV_ACCOUNT_3, "").strip()
+    token_3 = os.environ.get(_CF_ENV_TOKEN_3, "").strip()
+    if account_3 and token_3:
+        creds.append((account_3, token_3))
+    return creds
 
 
 def _make_client(key: str, base_url: str, headers: dict) -> Optional[openai.OpenAI]:
@@ -138,6 +174,31 @@ def add_key(provider_input: str, key: str) -> tuple[bool, str]:
         _update_env_file(_CF_ENV_KEY, clean_key)
         return True, "Cloudflare global API key saved."
 
+    if normalized == "cloudflare-token":
+        os.environ[_CF_ENV_TOKEN] = clean_key
+        _update_env_file(_CF_ENV_TOKEN, clean_key)
+        return True, "Cloudflare API token saved."
+
+    if normalized == "cloudflare-account-2":
+        os.environ[_CF_ENV_ACCOUNT_2] = clean_key
+        _update_env_file(_CF_ENV_ACCOUNT_2, clean_key)
+        return True, "Cloudflare fallback account id #2 saved."
+
+    if normalized == "cloudflare-token-2":
+        os.environ[_CF_ENV_TOKEN_2] = clean_key
+        _update_env_file(_CF_ENV_TOKEN_2, clean_key)
+        return True, "Cloudflare fallback API token #2 saved."
+
+    if normalized == "cloudflare-account-3":
+        os.environ[_CF_ENV_ACCOUNT_3] = clean_key
+        _update_env_file(_CF_ENV_ACCOUNT_3, clean_key)
+        return True, "Cloudflare fallback account id #3 saved."
+
+    if normalized == "cloudflare-token-3":
+        os.environ[_CF_ENV_TOKEN_3] = clean_key
+        _update_env_file(_CF_ENV_TOKEN_3, clean_key)
+        return True, "Cloudflare fallback API token #3 saved."
+
     if normalized == "cloudflare":
         parts = [p.strip() for p in clean_key.split(",")]
         if len(parts) == 3 and all(parts):
@@ -149,31 +210,46 @@ def add_key(provider_input: str, key: str) -> tuple[bool, str]:
             _update_env_file(_CF_ENV_EMAIL, email)
             _update_env_file(_CF_ENV_KEY, api_key)
             return True, "Cloudflare credentials saved."
-        return False, "Use: /add-api cloudflare <account_id,email,global_api_key>"
+        if len(parts) == 2 and all(parts):
+            account, token = parts
+            os.environ[_CF_ENV_ACCOUNT] = account
+            os.environ[_CF_ENV_TOKEN] = token
+            _update_env_file(_CF_ENV_ACCOUNT, account)
+            _update_env_file(_CF_ENV_TOKEN, token)
+            return True, "Cloudflare account + API token saved."
+        return False, "Use: /add-api cloudflare <account_id,email,global_api_key> OR <account_id,api_token>"
 
     return False, (
         f"Unknown provider '{provider_input}'. "
-        "Use: cloudflare-account, cloudflare-email, cloudflare-key, or cloudflare"
+        "Use: cloudflare-account, cloudflare-email, cloudflare-key, cloudflare-token, "
+        "cloudflare-account-2, cloudflare-token-2, cloudflare-account-3, cloudflare-token-3, or cloudflare"
     )
 
 
 def list_providers() -> list[dict]:
-    cf = _cf_creds()
+    global_creds = _cf_global_creds()
+    token_creds = _cf_token_creds()
+    previews: list[str] = []
+    if global_creds:
+        previews.append(_preview(global_creds[2]))
+    for _, tok in token_creds:
+        previews.append(_preview(tok))
+    configured = bool(global_creds or token_creds)
     return [
         {
             "name": "cloudflare",
             "display": "Cloudflare AI",
-            "configured": bool(cf),
-            "preview": _preview(cf[2] if cf else ""),
+            "configured": configured,
+            "preview": ", ".join(previews[:3]),
             "models": list(_TIER_MODELS.values()),
-            "key_count": 1 if cf else 0,
-            "extra": "primary" if cf else "missing account/email/key",
+            "key_count": len(previews),
+            "extra": "fallback-ready" if configured and len(previews) > 1 else ("configured" if configured else "missing credentials"),
         }
     ]
 
 
 def has_configured_provider() -> bool:
-    return bool(_cf_creds())
+    return bool(_cf_global_creds() or _cf_token_creds())
 
 
 def describe_tiers() -> dict[str, str]:
@@ -195,18 +271,29 @@ class APIManager:
         self._build()
 
     def _build(self) -> None:
-        cf = _cf_creds()
+        global_creds = _cf_global_creds()
+        token_creds = _cf_token_creds()
         chain: list[tuple[str, str, str, dict, str]] = []
-        if cf:
-            account, email, key = cf
-            model = _TIER_MODELS.get(self._tier, _TIER_MODELS[_DEFAULT_TIER])
+        model = _TIER_MODELS.get(self._tier, _TIER_MODELS[_DEFAULT_TIER])
+        if global_creds:
+            account, email, key = global_creds
             chain.append(
                 (
                     "cloudflare",
                     model,
                     _CF_BASE_TMPL.format(account_id=account),
-                    _cf_headers(email, key),
+                    _cf_headers_global(email, key),
                     key,
+                )
+            )
+        for i, (account, token) in enumerate(token_creds, start=1):
+            chain.append(
+                (
+                    f"cloudflare-token-{i}",
+                    model,
+                    _CF_BASE_TMPL.format(account_id=account),
+                    _cf_headers_token(token),
+                    token,
                 )
             )
         self._chain = chain
@@ -224,16 +311,10 @@ class APIManager:
         self._index = 0
 
     def route_task(self, text: str) -> str:
-        cf = _cf_creds()
-        if not cf:
+        current = self.current
+        if not current:
             return _heuristic_route(text)
-
-        account, email, key = cf
-        client = _make_client(
-            key=key,
-            base_url=_CF_BASE_TMPL.format(account_id=account),
-            headers=_cf_headers(email, key),
-        )
+        client = _make_client(key=current[4], base_url=current[2], headers=current[3])
         if client is None:
             return _heuristic_route(text)
 
@@ -298,6 +379,11 @@ class APIManager:
         return _make_client(key=current[4], base_url=current[2], headers=current[3])
 
     def try_next(self) -> bool:
+        if not self._chain:
+            return False
+        if self._index + 1 < len(self._chain):
+            self._index += 1
+            return True
         return False
 
     def __len__(self) -> int:
