@@ -498,10 +498,21 @@ def _raw(text: str, end: str = "") -> None:
         for chunk in chunks[1:]:
             _out_buf.append(_out_acc[0])
             _out_acc[0] = chunk
+    _scroll[0] = 0
     _render()
 
 def _clear_line() -> None:
     pass  # spinner clearing is handled by _render()
+
+
+def _current_output_line_count() -> int:
+    with _out_lock:
+        total = len(_out_buf)
+        if _out_acc[0]:
+            total += 1
+    if _stream[0]:
+        total += len(_stream[0].split('\n'))
+    return total
 
 def _do_render() -> None:
     """Full terminal redraw: output area + gold divider + status bar + input bar."""
@@ -1086,8 +1097,8 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
         if state == "done":
             done_step = sanitize(detail) if detail else "completed"
             _set_task_lines(
-                f"  \033[38;5;40m●{RESET} \033[38;5;151m{_task_done_title(title)} ({context}){RESET}",
-                f"    \033[38;5;151m└─ {done_step}{RESET}",
+                f"  {GREEN}●{RESET} {GREEN}{_task_done_title(title)} ({context}){RESET}",
+                f"    {GREEN}└─ {done_step}{RESET}",
             )
         else:
             err = sanitize(detail) if detail else "failed"
@@ -2501,79 +2512,83 @@ def main_loop():
         raw = ''.join(_inp_buf).strip()
         _inp_buf.clear()
         _inp_pos[0] = 0
-        if not raw:
-            _render()
-            return
+        try:
+            if not raw:
+                return
 
-        # Pin to bottom so echoed input + response appear just above the input bar
-        _scroll[0] = 0
-        # Echo the input into the output area (blue chevron + full-row subtle highlight)
-        w = max(_term.width or 80, 40)
-        msg = sanitize(raw)
-        plain = f"  > {msg} "
-        if len(plain) > w:
-            msg = msg[: max(0, w - len("  >  "))]
+            # Pin to bottom so echoed input + response appear just above the input bar
+            _scroll[0] = 0
+            # Echo the input into the output area (blue chevron + full-row subtle highlight)
+            w = max(_term.width or 80, 40)
+            msg = sanitize(raw)
             plain = f"  > {msg} "
-        pad = " " * max(0, w - len(plain))
-        _raw(
-            f"\033[48;5;236m  \033[38;5;75m>{RESET}"
-            f"\033[48;5;236m {WHITE}{msg}{pad} {RESET}\n"
-        )
+            if len(plain) > w:
+                msg = msg[: max(0, w - len("  >  "))]
+                plain = f"  > {msg} "
+            pad = " " * max(0, w - len(plain))
+            _raw(
+                f"\033[48;5;236m  \033[38;5;75m>{RESET}"
+                f"\033[48;5;236m {WHITE}{msg}{pad} {RESET}\n"
+            )
 
-        if raw.lower().startswith("/first "):
-            payload = raw[7:].strip()
-            if not payload:
-                _raw(f"  {DIM}Usage: /first <message or command>{RESET}\n"); return
-            _raw(f"  {GOLD}◆{RESET}  {WHITE}{sanitize(payload)}{RESET}  {AMBER}[FIRST]{RESET}\n")
+            if raw.lower().startswith("/first "):
+                payload = raw[7:].strip()
+                if not payload:
+                    _raw(f"  {DIM}Usage: /first <message or command>{RESET}\n"); return
+                _raw(f"  {GOLD}◆{RESET}  {WHITE}{sanitize(payload)}{RESET}  {AMBER}[FIRST]{RESET}\n")
+                qsize = msg_queue.size()
+                if qsize:
+                    _raw(f"  {AMBER}↑ pushed to front  [was Q:{qsize}]{RESET}\n")
+                msg_queue.put_first(payload)
+                return
+
+            if raw.startswith("/"):
+                _parts = raw.strip().split()
+                _cmd0  = _parts[0].lower()
+                _args0 = " ".join(_parts[1:])
+
+                if _cmd0 == "/search":
+                    if not _args0:
+                        _raw(f"  {DIM}Usage: /search <query>{RESET}\n"); return
+                    qsize = msg_queue.size()
+                    if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                    msg_queue.put(f"Search the web for: {_args0}"); return
+
+                if _cmd0 == "/research":
+                    if not _args0:
+                        _raw(f"  {DIM}Usage: /research <topic>{RESET}\n"); return
+                    qsize = msg_queue.size()
+                    if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                    msg_queue.put(f"Research this topic in depth and write a complete, well-structured report: {_args0}"); return
+
+                if _cmd0 == "/book":
+                    if not _args0:
+                        _raw(f"  {DIM}Usage: /book <title or author>{RESET}\n"); return
+                    qsize = msg_queue.size()
+                    if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                    msg_queue.put(f"Find and download this book: {_args0}"); return
+
+                custom = get_command(raw[1:].split()[0])
+                if custom:
+                    qsize = msg_queue.size()
+                    if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+                    msg_queue.put((custom["prompt"], raw)); return
+
+                if not handle_slash(raw):
+                    _raw(f"  {CORAL}Unknown command{RESET}  {DIM}{raw}{RESET}  {CYAN}/help{RESET} {DIM}for help{RESET}\n")
+                return
+
+            if raw.lower() in ("exit", "quit", "bye"):
+                handle_slash("/quit"); return
+
             qsize = msg_queue.size()
             if qsize:
-                _raw(f"  {AMBER}↑ pushed to front  [was Q:{qsize}]{RESET}\n")
-            msg_queue.put_first(payload)
-            return
-
-        if raw.startswith("/"):
-            _parts = raw.strip().split()
-            _cmd0  = _parts[0].lower()
-            _args0 = " ".join(_parts[1:])
-
-            if _cmd0 == "/search":
-                if not _args0:
-                    _raw(f"  {DIM}Usage: /search <query>{RESET}\n"); return
-                qsize = msg_queue.size()
-                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
-                msg_queue.put(f"Search the web for: {_args0}"); return
-
-            if _cmd0 == "/research":
-                if not _args0:
-                    _raw(f"  {DIM}Usage: /research <topic>{RESET}\n"); return
-                qsize = msg_queue.size()
-                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
-                msg_queue.put(f"Research this topic in depth and write a complete, well-structured report: {_args0}"); return
-
-            if _cmd0 == "/book":
-                if not _args0:
-                    _raw(f"  {DIM}Usage: /book <title or author>{RESET}\n"); return
-                qsize = msg_queue.size()
-                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
-                msg_queue.put(f"Find and download this book: {_args0}"); return
-
-            custom = get_command(raw[1:].split()[0])
-            if custom:
-                qsize = msg_queue.size()
-                if qsize: _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
-                msg_queue.put((custom["prompt"], raw)); return
-
-            if not handle_slash(raw):
-                _raw(f"  {CORAL}Unknown command{RESET}  {DIM}{raw}{RESET}  {CYAN}/help{RESET} {DIM}for help{RESET}\n")
-            return
-
-        if raw.lower() in ("exit", "quit", "bye"):
-            handle_slash("/quit"); return
-
-        qsize = msg_queue.size()
-        if qsize:
-            _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
-        msg_queue.put(raw)
+                _raw(f"  {DIM}↓ queued [{qsize+1}]{RESET}\n")
+            msg_queue.put(raw)
+        finally:
+            _inp_buf.clear()
+            _inp_pos[0] = 0
+            _render(force=True)
 
     # ── Blessed two-zone input loop ────────────────────────────────────────────
     t = _term
@@ -2599,6 +2614,11 @@ def main_loop():
 
             if not key:
                 continue
+
+            if _inp_pos[0] < 0:
+                _inp_pos[0] = 0
+            elif _inp_pos[0] > len(_inp_buf):
+                _inp_pos[0] = len(_inp_buf)
 
             kc = key.code
             ks = str(key)
@@ -2629,7 +2649,7 @@ def main_loop():
 
             elif kc == t.KEY_PGUP:
                 out_h = max(t.height - 4, 1)
-                with _out_lock: max_s = max(0, len(_out_buf) - out_h)
+                max_s = max(0, _current_output_line_count() - out_h)
                 _scroll[0] = min(_scroll[0] + out_h, max_s); _render()
 
             elif kc == t.KEY_PGDN:
@@ -2637,7 +2657,7 @@ def main_loop():
                 _scroll[0] = max(0, _scroll[0] - out_h); _render()
 
             elif kc == t.KEY_UP:
-                with _out_lock: max_s = max(0, len(_out_buf) - 1)
+                max_s = max(0, _current_output_line_count() - 1)
                 _scroll[0] = min(_scroll[0] + 3, max_s); _render()
 
             elif kc == t.KEY_DOWN:
