@@ -71,7 +71,7 @@ if not _has_cf and not os.getenv("OPENROUTER_API_KEY"):
     sys.exit(1)
 
 # ── Imports ───────────────────────────────────────────────────────────────────
-from core.orchestrator import Orchestrator, TOOL_EVENT_PREFIX
+from core.orchestrator import Orchestrator, TOOL_EVENT_PREFIX, TOOL_RESULT_PREFIX
 from core.tool_registry import ToolRegistry
 from audio.recorder import record_until_silence
 from audio.stt import transcribe
@@ -355,6 +355,83 @@ def _task_title(tool_name: str) -> tuple[str, str]:
 def _task_done_title(running_title: str) -> str:
     head, tail = (running_title.split(" ", 1) + [""])[:2]
     return f"{_TASK_VERB_PAST.get(head, 'Done')} {tail}".strip()
+
+
+def _safe_name(path_like: str) -> str:
+    try:
+        return _Path(path_like).name or path_like
+    except Exception:
+        return path_like
+
+
+def _task_display(tool_name: str, args: dict | None = None) -> tuple[str, str, str]:
+    args = args or {}
+    context = _TASK_CONTEXT.get(tool_name, "task")
+    status = TOOL_STATUS.get(tool_name, "working...")
+    first = status.split(" ", 1)[0].lower().strip(".")
+    verb = _TASK_VERB_PRESENT.get(first, "Running")
+
+    if tool_name == "open_app":
+        app = str(args.get("app_name", "")).strip() or "app"
+        exe = APP_MAP.get(app.lower(), app)
+        target = app.title() if app else "app"
+        return f"{verb} {target}", context, exe
+
+    if tool_name == "write_file":
+        p = str(args.get("path", "")).strip()
+        return f"{verb} {_safe_name(p) if p else 'file'}", context, p or "write requested"
+
+    if tool_name == "read_file":
+        p = str(args.get("path", "")).strip()
+        return f"{verb} {_safe_name(p) if p else 'file'}", context, p or "read requested"
+
+    if tool_name == "delete_file":
+        p = str(args.get("path", "")).strip()
+        return f"{verb} {_safe_name(p) if p else 'file'}", context, p or "delete requested"
+
+    if tool_name == "search_files":
+        pattern = str(args.get("name_pattern", "")).strip()
+        search_dir = str(args.get("search_dir", "")).strip()
+        target = f"\"{pattern}\"" if pattern else "files"
+        step = search_dir if search_dir else "search requested"
+        return f"{verb} {target}", context, step
+
+    if tool_name == "run_command":
+        cmd = str(args.get("command", "")).strip()
+        lower = cmd.lower()
+        if "start-process" in lower:
+            parts = cmd.split()
+            exe = parts[-1] if parts else cmd
+            tgt = _safe_name(exe).replace(".exe", "")
+            return f"Opening {tgt.title()}", "shell", cmd
+        if "select-string" in lower and "-pattern" in lower and "-path" in lower:
+            pat = ""
+            path = ""
+            try:
+                pat = cmd.split("-pattern", 1)[1].split("-path", 1)[0].strip().strip("\"'")
+                path = cmd.split("-path", 1)[1].strip().split()[0].strip("\"'")
+            except Exception:
+                pass
+            if pat and path:
+                return f"Searching \"{pat}\" in {_safe_name(path)}", "grep", cmd
+        return f"{verb} command", "shell", cmd or "command requested"
+
+    if tool_name in ("move_file", "copy_file"):
+        src = str(args.get("source", "")).strip()
+        dst = str(args.get("destination", "")).strip()
+        target = _safe_name(src) if src else "file"
+        step = f"{src} -> {dst}".strip(" ->")
+        return f"{verb} {target}", context, step or "operation requested"
+
+    if tool_name == "open_url":
+        url = str(args.get("url", "")).strip()
+        return f"{verb} {_safe_name(url) if url else 'url'}", context, url or "open requested"
+
+    if tool_name == "scrape_page":
+        url = str(args.get("url", "")).strip()
+        return f"{verb} {_safe_name(url) if url else 'page'}", context, url or "fetch requested"
+
+    return f"{verb} {tool_name.replace('_', ' ')}", context, TOOL_STATUS.get(tool_name, "working...")
 
 
 _TASK_RUN_STEP = {
@@ -1095,7 +1172,7 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
         title = active_task["title"]
         context = active_task["context"]
         if state == "done":
-            done_step = sanitize(detail) if detail else "completed"
+            done_step = sanitize(detail) if detail else active_task.get("run_step", "completed")
             _set_task_lines(
                 f"  {GREEN}●{RESET} {GREEN}{_task_done_title(title)} ({context}){RESET}",
                 f"    {GREEN}└─ {done_step}{RESET}",
@@ -1119,10 +1196,19 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
 
         if token.startswith(TOOL_EVENT_PREFIX):
             _close_task("done")
-            tool_name = token[len(TOOL_EVENT_PREFIX):]
+            payload = token[len(TOOL_EVENT_PREFIX):]
+            tool_name = payload
+            tool_args: dict = {}
+            if payload.startswith("{"):
+                try:
+                    meta = json.loads(payload)
+                    tool_name = str(meta.get("name", ""))
+                    tool_args = meta.get("args") if isinstance(meta.get("args"), dict) else {}
+                except Exception:
+                    tool_name = payload
+                    tool_args = {}
             status_ref[0] = TOOL_STATUS.get(tool_name, "working...")
-            title, context = _task_title(tool_name)
-            run_step = _TASK_RUN_STEP.get(tool_name, TOOL_STATUS.get(tool_name, "working..."))
+            title, context, run_step = _task_display(tool_name, tool_args)
             with _out_lock:
                 if _out_acc[0]:
                     _out_buf.append(_out_acc[0])
@@ -1132,7 +1218,33 @@ def ask_streaming(user_text: str, abort_check=None, model_tier: str = "auto") ->
                 _out_buf.append(f"    {DIM}└─ {sanitize(run_step)}{RESET}")
             _scroll[0] = 0
             _render(force=True)
-            active_task = {"name": tool_name, "title": title, "context": context, "idx": idx}
+            active_task = {
+                "name": tool_name,
+                "title": title,
+                "context": context,
+                "idx": idx,
+                "run_step": run_step,
+            }
+            continue
+
+        if token.startswith(TOOL_RESULT_PREFIX):
+            payload = token[len(TOOL_RESULT_PREFIX):]
+            state = "done"
+            tool_name = ""
+            detail = ""
+            if payload.startswith("{"):
+                try:
+                    meta = json.loads(payload)
+                    state = str(meta.get("state", "done"))
+                    tool_name = str(meta.get("name", ""))
+                    detail = str(meta.get("detail", ""))
+                except Exception:
+                    state = "done"
+            if active_task and (not tool_name or active_task.get("name") == tool_name):
+                if state == "failed":
+                    _close_task("failed", detail)
+                else:
+                    _close_task("done", detail)
             continue
 
         if not header_printed:

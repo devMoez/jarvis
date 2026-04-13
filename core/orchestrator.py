@@ -8,6 +8,7 @@ from core import stats as _stats
 from core.error_log import log_error
 
 TOOL_EVENT_PREFIX = "__TOOL__"
+TOOL_RESULT_PREFIX = "__TOOL_RESULT__"
 _MAX_TOKENS_BY_TIER = {
     "light": 1024,
     "heavy": 4096,
@@ -63,7 +64,7 @@ class Orchestrator:
     def process(self, user_input: str, memory_context: str = "") -> str:
         return "".join(
             t for t in self.process_stream(user_input, memory_context)
-            if not t.startswith(TOOL_EVENT_PREFIX)
+            if not t.startswith(TOOL_EVENT_PREFIX) and not t.startswith(TOOL_RESULT_PREFIX)
         )
 
     # ── Streaming core ────────────────────────────────────────────────────────
@@ -220,12 +221,14 @@ class Orchestrator:
                     self.history.add_assistant(full_response + msg)
                     return
 
-                yield f"{TOOL_EVENT_PREFIX}{tc['name']}"
                 try:
                     args = json.loads(tc["args"]) if tc["args"] else {}
                 except json.JSONDecodeError:
                     args = {}
+                yield f"{TOOL_EVENT_PREFIX}{json.dumps({'name': tc['name'], 'args': args}, ensure_ascii=False)}"
                 result = self.registry.dispatch(tc["name"], args)
+                state = "failed" if result.strip().lower().startswith("error") else "done"
+                yield f"{TOOL_RESULT_PREFIX}{json.dumps({'state': state, 'name': tc['name'], 'detail': result}, ensure_ascii=False)}"
                 loop_messages.append({
                     "role":         "tool",
                     "tool_call_id": tc["id"],
