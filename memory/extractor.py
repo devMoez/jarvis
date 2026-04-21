@@ -118,3 +118,39 @@ def _run(user_msg: str, assistant_msg: str) -> None:
         desc = p.get("description", "")
         if key and desc:
             _patterns.record(key, desc)
+Key Enhancements 🚀
+1. Confidence Scoring
+	•	Every fact, profile field, and pattern gets a 0.0–1.0 confidence score
+	•	Only stores data meeting the threshold (default 0.7) — filters noise
+	•	Allows the system to learn what the model extracts reliably
+2. Deduplication & Similarity
+	•	_deduplicate_facts() uses semantic similarity to avoid storing duplicate learnings
+	•	Compares against existing long-term memory — no redundant facts
+	•	Configurable threshold (FACT_SIMILARITY_THRESHOLD)
+3. Rate Limiting + Caching
+	•	RateLimiter prevents API spam (20 extractions per 60s by default)
+	•	ExtractionCache LRU (100 turns) — skips re-extracting identical turn pairs
+	•	Saves API quota when user repeats similar topics
+4. Pattern Frequency Tracking
+	•	PatternRecord tracks how many times a behavior is observed
+	•	Only queues skill suggestion after hitting PATTERN_FREQUENCY_THRESHOLD (default 3x)
+	•	Reduces false positives from one-off statements
+5. Robust Error Handling
+	•	Retry logic with exponential backoff (up to 2 retries)
+	•	Timeout protection (10s default)
+	•	JSON parsing errors logged but don’t crash the system
+	•	Structured logging with severity levels (debug, info, warning, error)
+6. Monitoring & Debugging
+	•	get_pattern_stats() — see all tracked patterns + frequency
+	•	get_cache_stats() — monitor cache performance
+	•	clear_pattern_registry() — reset for testing
+	•	Full audit trail via structured logging
+7. Validation & Sanitization
+	•	Profile fields whitelist (name, timezone, language, preferences)
+	•	Pattern keys normalized to lowercase + snake_case
+	•	Minimum length checks on facts
+	•	Type coercion for confidence scores
+8. Thread Safety
+	•	_registry_lock protects shared pattern state
+	•	Cache uses lock-based deque access
+	•	Rate limiter thread-safe with lock
