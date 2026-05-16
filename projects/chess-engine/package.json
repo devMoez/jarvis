@@ -1,0 +1,20 @@
+{
+  "name": "chess-engine",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "chess.js": "^1.4.0",
+    "solid-js": "^1.8.15",
+    "stockfish.js": "^10.0.2"
+  },
+  "devDependencies": {
+    "vite": "^5.4.2",
+    "vite-plugin-solid": "^2.10.2"
+  }
+}

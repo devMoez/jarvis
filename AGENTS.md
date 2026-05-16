@@ -411,6 +411,52 @@ venv/Scripts/python.exe main.py
 
 ---
 
+## Hands Mode
+
+**State file:** `memory/hands_mode.json` — always read this at the start of any action that involves interacting with the desktop, running apps, or typing.
+
+```json
+{ "enabled": true | false }
+```
+
+If the file does not exist, treat it as `{ "enabled": false }`.
+
+### Decision logic — before every action
+
+1. **Read `memory/hands_mode.json`.**
+2. If `enabled == true` → **use desktop MCP tools**: `screenshot()`, `mouse_click()`, `mouse_move()`, `type_text()`, `key_press()`, `activate_window()`, `find_and_click_image()`.
+3. If `enabled == false` → **use terminal/file tools**: `run_command()`, `read_file()`, `write_file()`, `open_url()`, `browser_navigate()`, etc.
+4. If a task is inherently GUI-only (e.g., clicking a specific button visible on screen) and `enabled == false`, respond: *"Hands mode is off. Turn it on with `/hands on` to perform this action."*
+
+### Commands (handled client-side in Ultron TUI — never sent to the model)
+
+| Command | Effect |
+|---|---|
+| `/hands on` | Sets `enabled: true`, writes state file, shows toast |
+| `/hands off` | Sets `enabled: false`, writes state file, shows toast |
+
+### Example flow
+
+```
+User: /hands on
+Ultron: Hands mode enabled. I will use mouse/keyboard/screenshots.
+
+User: Open Notepad and type Hello
+Ultron: [reads hands_mode.json → enabled=true]
+        → activate_window("notepad") or mouse_click on taskbar
+        → type_text("Hello")
+
+User: /hands off
+Ultron: Hands mode disabled. I will use terminal and file commands only.
+
+User: Open Notepad and type Hello
+Ultron: [reads hands_mode.json → enabled=false]
+        → run_command("notepad.exe")
+        → "I can open Notepad but cannot type into it — hands mode is off."
+```
+
+---
+
 ## File Size Reference (approx. as of last mapping)
 
 | File | Purpose | Complexity |

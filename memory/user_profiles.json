@@ -1,0 +1,37 @@
+{
+  "moez": {
+    "name": "Moez",
+    "username": "moez991",
+    "first_seen": "2026-04-24",
+    "last_seen": "2026-04-24",
+    "interaction_count": 0,
+    "preferences": {
+      "language": "typescript",
+      "runtime": "bun",
+      "stack": ["TypeScript", "Bun", "Effect.js", "Solid.js", "Python", "FastAPI"],
+      "os": "Windows 11",
+      "shell": "PowerShell + Git Bash",
+      "editor": "Ultron (OpenCode)",
+      "dark_theme": true,
+      "ui_style": "minimal, dark, no bloat"
+    },
+    "communication": {
+      "default_mode": "caveman",
+      "tone": "direct, terse, technical",
+      "language": "en + casual",
+      "typo_rate": "high",
+      "emoji_tolerance": "low",
+      "prefers_bullet_points": true,
+      "hates": ["long intros", "filler phrases", "asking permission", "over-explaining"]
+    },
+    "patterns": {
+      "recurring_tasks": [],
+      "frequent_errors": [],
+      "preferred_solutions": [],
+      "avoided_approaches": []
+    },
+    "opinion_history": [],
+    "past_recommendations": [],
+    "session_notes": []
+  }
+}
